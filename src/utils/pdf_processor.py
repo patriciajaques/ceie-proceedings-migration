@@ -1,6 +1,5 @@
 import os
 import json
-from pypdf import PdfReader
 from pdfminer.high_level import extract_text_to_fp
 from io import BytesIO
 
@@ -49,6 +48,7 @@ class PDFProcessor:
         Args:
             save_files (bool, optional): Indicates whether text files should be saved. Default is False.
             number_of_pages_to_process (int, optional): The number of pages to process in each PDF. Default is 1.
+                If -1, processes all pages. Otherwise, limits to the specified number of pages.
 
         Returns:
             list: A list containing the data of all processed PDF files. Each item in the list is a dictionary
@@ -64,6 +64,15 @@ class PDFProcessor:
                 text_pages, numPages = self.extract_text_from_each_page_using_pdfminer(
                     pdf_path
                 )
+
+                # Limit the number of pages to process if specified
+                original_num_pages = numPages
+                if number_of_pages_to_process != -1 and number_of_pages_to_process > 0:
+                    # Process only the first N pages
+                    text_pages = text_pages[:number_of_pages_to_process]
+                    # Update numPages to reflect the actual number of pages processed
+                    numPages = min(original_num_pages, number_of_pages_to_process)
+
                 # Separate the filename from its extension
                 base_filename = os.path.splitext(filename)[0]
                 fileData = {

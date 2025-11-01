@@ -1,12 +1,12 @@
 {
-    "site_url": "http://milanesa.ime.usp.br/rbie/index.php/sbie/issue/view/78",
-    "year": "2013",
+    "site_url": "http://milanesa.ime.usp.br/rbie/index.php/wcbie/issue/view/195",
+    "year": "2019",
     "output_dir": "output/",
-    "doi_prefix": "10.5753/cbie.sbie.",
+    "doi_prefix": "https://doi.org/10.5753/cbie.wcbie.",
     "prompts_file": "config/prompts.yaml",
-    "engine": "gpt-4o-mini",
+    "engine": "gpt-5-mini-2025-08-07",
     "pages_to_process": 11,
-    "files_to_download": -1,
+    "files_to_download": 5,
     "files_to_download_description": "Use -1 to download all files"
 }
 

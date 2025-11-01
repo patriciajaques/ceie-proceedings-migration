@@ -1,5 +1,4 @@
 # src/services/migrator.py
-from urllib.parse import unquote, urlparse
 from src.config.config_loader import ConfigLoader
 from src.services.pdf_downloader import PDFDownloader
 from src.utils.pdf_processor import PDFProcessor
@@ -7,10 +6,8 @@ from src.services.anais_ojs_html_parser import OJSHTMLParser
 from src.services.article_extractor import ArticleExtractor
 from src.io.csv_writer import CsvWriter
 from src.logging.json_logger import JsonLogger
-from src.services.authors_affiliation_corrector import AuthorsAffiliationCorrector
 from src.domain.article import Article
 import os
-import json
 
 
 class Migrator:
@@ -65,7 +62,7 @@ class Migrator:
         self.downloader.donwload_pdf_files_from_url(num_files)
 
         # 2) Extract article information from the downloaded PDFs
-        articles_list = self.extract_metadata(num_files)
+        articles_list = self.extract_metadata(num_files, num_pages)
 
         # 3) Complete missing fields in the articles by calling the AI API
         self.complete_missing_fields(articles_list)
@@ -73,18 +70,21 @@ class Migrator:
         # 4) Return the processed metadata
         return articles_list
 
-    def extract_metadata(self, num_files=-1):
+    def extract_metadata(self, num_files=-1, num_pages=11):
         """
         Extracts metadata from the PDFs and website.
 
         Args:
             num_files (int, optional): Number of PDF files to process. Default is -1, which processes all files.
+            num_pages (int, optional): Number of pages to process from each PDF. Default is 11.
 
         Returns:
             list: List of Article objects containing article metadata.
         """
         # 1) Process all PDFs in the directory, extracting the text
-        all_files_data = self.processor.process_all_pdfs(save_files=False)
+        all_files_data = self.processor.process_all_pdfs(
+            save_files=False, number_of_pages_to_process=num_pages
+        )
 
         # 2) Extract article information from the website into a list of dictionaries
         website_articles_data_list = self.parser.extract_articles_info_from_the_website(
@@ -108,10 +108,14 @@ class Migrator:
         )
 
         # 6) Write article information to CSV files
+        # First, write all articles together
         csv_writer = CsvWriter(
             self.csv_save_dir, "Artigos.csv", "Autores.csv", "Referencias.csv", True
         )
         csv_writer.write_dicts_to_csv(articles_list)
+
+        # 7) Write CSV files separated by workshop/section
+        self.write_csv_by_workshop(articles_list, True)
 
         return articles_list
 
@@ -151,6 +155,9 @@ class Migrator:
             self.csv_save_dir, "Artigos.csv", "Autores.csv", "Referencias.csv", False
         )
         csv_writer.write_dicts_to_csv(updated_articles)
+
+        # Write CSV files separated by workshop/section
+        self.write_csv_by_workshop(updated_articles, False)
 
         return updated_articles
 
@@ -233,3 +240,46 @@ class Migrator:
         """
         if hasattr(article, "first_page") and article.first_page:
             article.doi = f"{self.doi_prefix}{self.year}.{article.first_page}"
+
+    def write_csv_by_workshop(self, articles_list, antes=True):
+        """
+        Writes CSV files separated by workshop/section.
+
+        Args:
+            articles_list (list): List of Article objects.
+            antes (bool): If True, adds 'antes_' prefix to filenames.
+        """
+        # Group articles by section
+        workshops = {}
+        for article in articles_list:
+            section = (
+                article.section_abbrev
+                if hasattr(article, "section_abbrev")
+                else article.to_dict().get("sectionAbbrev", "UNKNOWN")
+            )
+
+            if section not in workshops:
+                workshops[section] = []
+            workshops[section].append(article)
+
+        # Create CSV files for each workshop
+        for workshop_name, workshop_articles in workshops.items():
+            if not workshop_articles:
+                continue
+
+            # Create subdirectory for workshop
+            workshop_dir = os.path.join(self.csv_save_dir, "por_workshop")
+
+            csv_writer = CsvWriter(
+                workshop_dir,
+                f"{workshop_name}_Artigos.csv",
+                f"{workshop_name}_Autores.csv",
+                f"{workshop_name}_Referencias.csv",
+                antes,
+            )
+            csv_writer.write_dicts_to_csv(workshop_articles)
+
+        print(
+            f"\nCSV files by workshop created in {os.path.join(self.csv_save_dir, 'por_workshop')}"
+        )
+        print(f"Total workshops processed: {len(workshops)}")

@@ -57,17 +57,43 @@ class OpenAIClient(BaseAIClient):
         """
         try:
             return_type = "json_object" if is_json else "text"
-            completion = self.client.chat.completions.create(
-                model=self.model,
-                response_format={"type": return_type},
-                messages=[
+
+            # Build base parameters
+            params = {
+                "model": self.model,
+                "response_format": {"type": return_type},
+                "messages": [
                     {"role": "system", "content": self.system_message},
                     {"role": "user", "content": user_message},
                 ],
-                temperature=0,
-                max_tokens=4000,
-            )
+                "max_completion_tokens": 4000,
+            }
+
+            # Some newer models don't support custom temperature values
+            # Only set temperature if the model is known to support it
+            # Models like gpt-5-mini only support default temperature (1)
+            if not self._is_temperature_restricted_model():
+                params["temperature"] = 0
+
+            completion = self.client.chat.completions.create(**params)
             return completion.choices[0].message.content
         except Exception as e:
             print(f"\n\nError creating OpenAI completion: {e}")
             return ""
+
+    def _is_temperature_restricted_model(self):
+        """
+        Check if the model only supports default temperature value.
+
+        Some newer models like gpt-5-mini-* only support the default temperature (1)
+        and will error if temperature=0 is explicitly set.
+
+        Returns:
+            bool: True if the model only supports default temperature.
+        """
+        restricted_patterns = [
+            "gpt-5-",
+            "o3-",
+            "o4-",
+        ]
+        return any(pattern in self.model for pattern in restricted_patterns)
