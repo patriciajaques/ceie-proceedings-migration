@@ -75,7 +75,14 @@ class CsvWriter:
         """
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", newline="", encoding="utf-8") as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=headers, delimiter=";")
+            writer = csv.DictWriter(
+                csvfile, 
+                fieldnames=headers, 
+                delimiter=";",
+                quoting=csv.QUOTE_ALL,
+                escapechar=None,
+                doublequote=True
+            )
             writer.writeheader()
             for seq, data in enumerate(data_list, start=1):
                 process_function(writer, seq, data)
@@ -218,3 +225,47 @@ class CsvWriter:
             self.process_references_data,
         )
         print(f"CSV files created in {self.save_directory}")
+
+    @staticmethod
+    def write_sections_csv(save_directory, sections_data):
+        """
+        Write sections data to a CSV file.
+        
+        Args:
+            save_directory (str): Directory to save the CSV file
+            sections_data (list): List of dictionaries containing section information
+        """
+        headers_sections = [
+            "sectionTitle",
+            "sectionTitleEn",
+            "sectionAbbrev",
+            "blind",
+            "numSubmitted",
+            "numAccepted",
+            "dateSub",
+            "dateResult",
+            "dateReady",
+        ]
+        
+        path_sections_csv = f"{save_directory}/Secoes.csv"
+        
+        os.makedirs(save_directory, exist_ok=True)
+        
+        with open(path_sections_csv, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(
+                csvfile, 
+                fieldnames=headers_sections, 
+                delimiter=";",
+                quoting=csv.QUOTE_ALL,
+                escapechar=None,
+                doublequote=True
+            )
+            writer.writeheader()
+            for section_data in sections_data:
+                # Filter to include only fields in headers
+                row_data = {
+                    key: section_data.get(key, "") for key in headers_sections
+                }
+                writer.writerow(row_data)
+        
+        print(f"Secoes.csv created in {save_directory}")

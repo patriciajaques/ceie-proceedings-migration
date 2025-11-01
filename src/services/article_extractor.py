@@ -1,11 +1,8 @@
 import json
 import re
-from typing import Dict, List, Optional, Union, Tuple
-from src.config.config_loader import ConfigLoader
+from typing import Dict, List, Optional
 from src.utils.text_processor import TextProcessor
 from src.domain.article import Article
-from src.domain.author import Author
-from src.domain.reference import Reference
 from src.adapters.ai_client_interface import AIClientInterface
 
 
@@ -21,7 +18,7 @@ class ArticleExtractor:
         article_ai_client: AIClientInterface,
         references_ai_client: AIClientInterface,
         field_completion_ai_client: AIClientInterface,
-        text_processor: TextProcessor = None,
+        text_processor: Optional[TextProcessor] = None,
     ):
         """Initializes the article extractor.
 
@@ -217,7 +214,9 @@ class ArticleExtractor:
             ):
 
                 print(
-                    f"Improving article record with seq {article_dict.get('seq')} and idJEMS: {article_dict.get('idJEMS')}"
+                    f"Improving article record with seq "
+                    f"{article_dict.get('seq')} and idJEMS: "
+                    f"{article_dict.get('idJEMS')}"
                 )
 
                 # Remove fields that don't need to be sent to AI
@@ -277,7 +276,12 @@ class ArticleExtractor:
         try:
             return self.parse_ai_response(json_info)
         except (ValueError, json.JSONDecodeError) as e:
-            print(f"\n\n\n**** Error decoding JSON: {e} *** \n\n\n")
+            print(f"\n\n\n**** Error decoding JSON: {e} ***")
+            response_preview = json_info[:500] if json_info else "None"
+            print(
+                f"**** Response received from model (first 500 chars): "
+                f"{response_preview} *** \n\n\n"
+            )
 
             # Try again with recursion limit
             if recursion_count < 3:

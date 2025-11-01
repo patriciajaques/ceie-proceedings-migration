@@ -1,0 +1,60 @@
+{
+  "_comment": "Arquivo de mapeamento de siglas personalizadas para sessões/workshops",
+  "_instructions": {
+    "priority": "Números menores têm prioridade maior (1 = maior prioridade)",
+    "type": "Atualmente apenas 'keywords' é suportado",
+    "all_keywords": "TODAS estas palavras devem estar presentes no nome da sessão",
+    "any_keywords": "Pelo menos UMA destas palavras deve estar presente (pode ser vazio)",
+    "base_sigla": "Sigla base a ser usada",
+    "suffixes": "Lista de configurações de sufixos baseados em palavras-chave adicionais",
+    "suffixes.keywords": "Palavras-chave que, se presentes, adicionam o sufixo correspondente",
+    "suffixes.suffix": "Sufixo a ser adicionado à sigla base"
+  },
+  "mappings": [
+    {
+      "priority": 1,
+      "description": "Concurso Alexandre Direne - mapeia para CTD com sufixos por tipo",
+      "type": "keywords",
+      "match": {
+        "all_keywords": ["concurso", "alexandre", "direne"],
+        "any_keywords": ["teses", "dissertações", "tcc", "trabalhos de conclusão"]
+      },
+      "base_sigla": "CTD",
+      "suffixes": [
+        {
+          "keywords": ["doutorado"],
+          "suffix": "D"
+        },
+        {
+          "keywords": ["mestrado"],
+          "suffix": "M"
+        },
+        {
+          "keywords": ["trabalhos de conclusão", "graduação", "de curso"],
+          "suffix": "G"
+        }
+      ]
+    },
+    {
+      "priority": 2,
+      "description": "Apps.Edu - mapeia para APE com sufixos por tipo",
+      "type": "keywords",
+      "match": {
+        "all_keywords": ["apps.edu"],
+        "any_keywords": []
+      },
+      "base_sigla": "APPS",
+      "suffixes": [
+        {
+          "keywords": ["produto"],
+          "suffix": "-P"
+        },
+        {
+          "keywords": ["protótipo"],
+          "suffix": "-R"
+        }
+      ]
+    }
+  ]
+}
+

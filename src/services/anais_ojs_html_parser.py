@@ -3,12 +3,15 @@ from src.services.pdf_downloader import PDFDownloader
 from src.config.config_loader import ConfigLoader
 import json
 import re
+import os
 from urllib.parse import urlparse, unquote
 
 
 class OJSHTMLParser:
-    def __init__(self, site_url):
+    def __init__(self, site_url, siglas_mapping_path=None):
         self.site_url = site_url
+        self.siglas_mapping_path = siglas_mapping_path or "config/section_siglas.json"
+        self._siglas_mappings = None
 
     def download_html_and_create_parser(self, site_url):
         downloader = PDFDownloader(site_url, "output")
@@ -42,10 +45,14 @@ class OJSHTMLParser:
 
         # Identify and process each section
         sections = soup.find_all("h4", class_="tocSectionTitle")
+        seen_abbrevs = {}  # Map to track how many times we've seen each abbreviation
+
         for section in sections:
             section_name = section.text.strip()
             # Generate section abbreviation based on the section name
-            section_abbrev = self._generate_section_abbrev(section_name)
+            base_section_abbrev = self._generate_section_abbrev(section_name)
+            # Make abbreviation unique if it's already been used
+            section_abbrev = self._make_abbrev_unique(base_section_abbrev, seen_abbrevs)
 
             # Find all articles in this section
             next_sibling = section.find_next_sibling()
@@ -102,9 +109,173 @@ class OJSHTMLParser:
 
         return data
 
+    def extract_sections_from_website(self):
+        """
+        Extracts sections information from the HTML file.
+
+        Returns:
+            list: A list of dictionaries containing section information with the following keys:
+                - sectionTitle: Section name in Portuguese
+                - sectionTitleEn: Section name in English (same as Portuguese if not available)
+                - sectionAbbrev: Section abbreviation (guaranteed unique)
+                - blind, numSubmitted, numAccepted, dateSub, dateResult, dateReady: Empty fields
+        """
+        soup = self.download_html_and_create_parser(self.site_url)
+
+        # Identify all sections using the same method as extract_articles_info_from_the_website
+        sections = soup.find_all("h4", class_="tocSectionTitle")
+
+        sections_data = []
+        seen_abbrevs = {}  # Map to track how many times we've seen each abbreviation
+
+        for section in sections:
+            section_name = section.text.strip()
+            base_section_abbrev = self._generate_section_abbrev(section_name)
+
+            # Make abbreviation unique if it's already been used
+            section_abbrev = self._make_abbrev_unique(base_section_abbrev, seen_abbrevs)
+
+            section_data = {
+                "sectionTitle": section_name,
+                "sectionTitleEn": section_name,  # Using same text as Portuguese for now
+                "sectionAbbrev": section_abbrev,
+                "blind": "",
+                "numSubmitted": "",
+                "numAccepted": "",
+                "dateSub": "",
+                "dateResult": "",
+                "dateReady": "",
+            }
+            sections_data.append(section_data)
+
+            # Warn if abbreviation had to be modified
+            if section_abbrev != base_section_abbrev:
+                print(
+                    f"AVISO: Sigla duplicada detectada! "
+                    f"Sessão '{section_name}' recebeu sigla única: {section_abbrev} "
+                    f"(original: {base_section_abbrev})"
+                )
+
+        return sections_data
+
+    def _make_abbrev_unique(self, base_abbrev, seen_abbrevs):
+        """
+        Makes an abbreviation unique by adding a numeric suffix if necessary.
+
+        Args:
+            base_abbrev (str): The base abbreviation.
+            seen_abbrevs (dict): Dictionary tracking how many times each abbreviation has been seen.
+
+        Returns:
+            str: A unique abbreviation.
+        """
+        if base_abbrev not in seen_abbrevs:
+            seen_abbrevs[base_abbrev] = 0
+            return base_abbrev
+        else:
+            seen_abbrevs[base_abbrev] += 1
+            return f"{base_abbrev}-{seen_abbrevs[base_abbrev]}"
+
+    def _load_siglas_mappings(self):
+        """
+        Loads the section siglas mapping from JSON file (lazy loading).
+
+        Returns:
+            list: List of mapping configurations, or empty list if file doesn't exist.
+        """
+        if self._siglas_mappings is not None:
+            return self._siglas_mappings
+
+        if not os.path.exists(self.siglas_mapping_path):
+            self._siglas_mappings = []
+            return []
+
+        try:
+            with open(self.siglas_mapping_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                # Sort by priority (higher priority first - lower number = higher priority)
+                mappings = config.get("mappings", [])
+                mappings.sort(key=lambda x: x.get("priority", 999), reverse=False)
+                self._siglas_mappings = mappings
+                return self._siglas_mappings
+        except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+            print(f"AVISO: Erro ao carregar mapeamento de siglas: {e}")
+            self._siglas_mappings = []
+            return []
+
+    def _check_sigla_mapping(self, section_name):
+        """
+        Checks if a section name matches any mapping configuration.
+
+        Args:
+            section_name (str): The full name of the section.
+
+        Returns:
+            str or None: The mapped sigla if a match is found, None otherwise.
+        """
+        section_name_lower = section_name.lower()
+        mappings = self._load_siglas_mappings()
+
+        for mapping in mappings:
+            if mapping.get("type") != "keywords":
+                continue
+
+            match_config = mapping.get("match", {})
+            all_keywords = match_config.get("all_keywords", [])
+            any_keywords = match_config.get("any_keywords", [])
+
+            # Check if all required keywords are present
+            if all_keywords:
+                if not all(
+                    keyword.lower() in section_name_lower for keyword in all_keywords
+                ):
+                    continue
+
+            # Check if at least one of the optional keywords is present
+            if any_keywords:
+                if not any(
+                    keyword.lower() in section_name_lower for keyword in any_keywords
+                ):
+                    continue
+
+            # Match found! Now determine suffix
+            base_sigla = mapping.get("base_sigla", "")
+            suffixes = mapping.get("suffixes", [])
+
+            suffix = ""
+            for suffix_config in suffixes:
+                suffix_keywords = suffix_config.get("keywords", [])
+                if any(
+                    keyword.lower() in section_name_lower for keyword in suffix_keywords
+                ):
+                    suffix = suffix_config.get("suffix", "")
+                    break
+
+            return f"{base_sigla}{suffix}" if suffix else base_sigla
+
+        return None
+
+    def _normalize_doi(self, doi):
+        """
+        Normalizes a DOI by removing URL prefixes, keeping only the identifier.
+
+        Args:
+            doi (str): DOI string that may include URL prefix.
+
+        Returns:
+            str: Normalized DOI identifier (e.g., "10.5753/cbie.wcbie.2019.1")
+        """
+        if not doi:
+            return ""
+
+        # Remove http://, https://, dx.doi.org/, doi.org/ prefixes
+        normalized = re.sub(r"^https?://(dx\.)?doi\.org/", "", doi.strip())
+        return normalized
+
     def _generate_section_abbrev(self, section_name):
         """
         Generates a section abbreviation based on the section name.
+        First checks custom mappings, then falls back to automatic generation.
 
         Args:
             section_name (str): The full name of the section.
@@ -112,6 +283,11 @@ class OJSHTMLParser:
         Returns:
             str: The abbreviated section name.
         """
+        # Check custom mappings first
+        mapped_sigla = self._check_sigla_mapping(section_name)
+        if mapped_sigla:
+            return mapped_sigla
+
         section_name_lower = section_name.lower()
 
         # Check for editorial
@@ -202,7 +378,9 @@ class OJSHTMLParser:
         if title_tag:
             title_td = title_tag.find_next_sibling("td")
             if title_td:
-                metadata["doi"] = title_td.text.strip()
+                doi_value = title_td.text.strip()
+                # Normalize DOI to store only the identifier (remove URL prefix)
+                metadata["doi"] = self._normalize_doi(doi_value)
 
         author_tags = soup.find_all("td", string=lambda x: x and "Autor" in x)
         for tag in author_tags:
@@ -259,7 +437,7 @@ class OJSHTMLParser:
             "keywordsOrig": "",
             "keywordsEn": "",
             "pages": "",
-            "doi": "",
+            "doi": metadata.get("doi", ""),  # Preserve DOI extracted from website
         }
 
         authors = []

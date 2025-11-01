@@ -1,7 +1,6 @@
 import os
 import json
-from pdfminer.high_level import extract_text_to_fp
-from io import BytesIO
+import fitz
 
 
 class PDFProcessor:
@@ -18,9 +17,9 @@ class PDFProcessor:
         """
         self.directory = directory
 
-    def extract_text_from_each_page_using_pdfminer(self, pdf_path):
+    def extract_text_from_each_page(self, pdf_path):
         """
-        Extract text from each page of a PDF file using pdfminer.
+        Extract text from each page of a PDF file using PyMuPDF (fitz).
 
         Args:
             pdf_path (str): The full path of the PDF file.
@@ -29,17 +28,22 @@ class PDFProcessor:
             tuple: A tuple containing a list of texts, where each position in the list contains the text of a page
                   of the PDF, and the total number of pages in the PDF.
         """
-        with open(pdf_path, "rb") as file:
-            output = BytesIO()
-            extract_text_to_fp(file, output)
-            text = output.getvalue().decode()
-            text_pages = text.split("\x0c")
-            if text_pages[-1] == "":
-                text_pages = text_pages[
-                    :-1
-                ]  # remove the last element if it's an empty string
-            total_pages = len(text_pages)
-            return text_pages, total_pages
+        doc = fitz.open(pdf_path)
+        text_pages = []
+        
+        for page_num in range(doc.page_count):
+            page = doc[page_num]
+            page_text = page.get_text()
+            text_pages.append(page_text)
+        
+        doc.close()
+        
+        # Remove empty pages at the end (if any)
+        while text_pages and text_pages[-1].strip() == "":
+            text_pages = text_pages[:-1]
+        
+        total_pages = len(text_pages)
+        return text_pages, total_pages
 
     def process_all_pdfs(self, save_files=False, number_of_pages_to_process=1):
         """
@@ -61,9 +65,7 @@ class PDFProcessor:
         for filename in os.listdir(self.directory):
             if filename.endswith(".pdf"):
                 pdf_path = os.path.join(self.directory, filename)
-                text_pages, numPages = self.extract_text_from_each_page_using_pdfminer(
-                    pdf_path
-                )
+                text_pages, numPages = self.extract_text_from_each_page(pdf_path)
 
                 # Limit the number of pages to process if specified
                 original_num_pages = numPages

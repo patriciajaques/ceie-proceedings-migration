@@ -8,6 +8,7 @@ from src.io.csv_writer import CsvWriter
 from src.logging.json_logger import JsonLogger
 from src.domain.article import Article
 import os
+import re
 
 
 class Migrator:
@@ -32,7 +33,9 @@ class Migrator:
         self.site_url = config_loader.get_config_value("site_url")
         self.output_dir = config_loader.get_config_value("output_dir")
         self.year = config_loader.get_config_value("year")
-        self.doi_prefix = config_loader.get_config_value("doi_prefix")
+        # doi_prefix is now optional - will be inferred from extracted DOIs if not provided
+        self.doi_prefix = config_loader.get_config_value("doi_prefix", None)
+        self.inferred_doi_prefix = None  # Will be set after extracting DOIs
 
         # Generate directories based on year
         self.pdf_save_dir = os.path.join(self.output_dir, f"{self.year}", "pdfs")
@@ -90,6 +93,10 @@ class Migrator:
         website_articles_data_list = self.parser.extract_articles_info_from_the_website(
             num_files
         )
+
+        # 2.5) Extract sections from the website and generate Secoes.csv
+        sections_data = self.parser.extract_sections_from_website()
+        CsvWriter.write_sections_csv(self.csv_save_dir, sections_data)
 
         # 3) Extract article information from PDF text into a list of Article objects
         pdf_articles_list = self.extractor.extract_articles_data_from_PDF_text(
@@ -178,6 +185,28 @@ class Migrator:
         # New list for merged articles
         merged_articles_list = []
 
+        # First pass: collect all extracted DOIs to infer prefix if needed
+        extracted_dois = []
+        for website_article in website_articles_data_list:
+            # Check if DOI was extracted from website
+            if "doi" in website_article and website_article["doi"]:
+                extracted_dois.append(website_article["doi"])
+
+            # Check if DOI was extracted from PDF
+            idJEMS = website_article["idJEMS"]
+            if idJEMS in pdf_articles_dict:
+                pdf_article = pdf_articles_dict[idJEMS]
+                if hasattr(pdf_article, "doi") and pdf_article.doi:
+                    extracted_dois.append(pdf_article.doi)
+
+        # Infer DOI prefix from extracted DOIs if not provided in config
+        if not self.doi_prefix and extracted_dois:
+            self.inferred_doi_prefix = self._infer_doi_prefix(extracted_dois)
+            if self.inferred_doi_prefix:
+                print(
+                    f"Prefixo DOI inferido automaticamente: {self.inferred_doi_prefix}"
+                )
+
         # Process each item in website_articles_data_list
         for website_article in website_articles_data_list:
             idJEMS = website_article["idJEMS"]
@@ -187,7 +216,11 @@ class Migrator:
                 # Create a base Article from the website data
                 merged_article = Article.from_dict(website_article)
 
-                # Update with PDF article data
+                # Update with PDF article data, but preserve DOI from website if it exists
+                website_doi = (
+                    merged_article.doi if hasattr(merged_article, "doi") else None
+                )
+
                 for attr, value in pdf_article.__dict__.items():
                     # Skip certain fields we want to keep from website data
                     if attr not in [
@@ -195,15 +228,23 @@ class Migrator:
                         "section_abbrev",
                         "first_page",
                         "num_pages",
+                        "doi",  # Preserve DOI from website if available
                     ]:
+                        # Normalize DOI if it comes from PDF
+                        if attr == "doi" and value:
+                            value = self._normalize_doi(value)
                         setattr(merged_article, attr, value)
+
+                # Restore website DOI if it was extracted (normalize it)
+                if website_doi:
+                    merged_article.doi = self._normalize_doi(website_doi)
 
                 # Update pages field
                 merged_article.pages = self.update_pages(
                     website_article["firstPage"], pdf_article.num_pages
                 )
 
-                # Correct DOI
+                # Correct/generate DOI only if not already extracted
                 self.correct_doi(merged_article)
 
                 merged_articles_list.append(merged_article)
@@ -231,15 +272,105 @@ class Migrator:
         else:
             return first_page
 
+    def _normalize_doi(self, doi):
+        """
+        Normalizes a DOI by removing URL prefixes, keeping only the identifier.
+
+        Args:
+            doi (str): DOI string that may include URL prefix.
+
+        Returns:
+            str: Normalized DOI identifier (e.g., "10.5753/cbie.wcbie.2019.1")
+        """
+        if not doi:
+            return ""
+
+        # Remove http://, https://, dx.doi.org/, doi.org/ prefixes
+        normalized = re.sub(r"^https?://(dx\.)?doi\.org/", "", doi.strip())
+        return normalized
+
+    def _infer_doi_prefix(self, dois):
+        """
+        Infers the DOI prefix from a list of extracted DOIs.
+
+        Args:
+            dois (list): List of DOI strings.
+
+        Returns:
+            str: Inferred DOI prefix (without the suffix part), or None if cannot infer.
+        """
+        if not dois:
+            return None
+
+        # Normalize DOIs - remove https://doi.org/ prefix if present
+        normalized_dois = []
+        for doi in dois:
+            if not doi:
+                continue
+            # Remove http/https and doi.org prefixes
+            normalized = self._normalize_doi(doi)
+            if normalized:
+                normalized_dois.append(normalized)
+
+        if not normalized_dois:
+            return None
+
+        # Find common prefix pattern
+        # DOI format is typically: 10.xxxx/prefix.year.suffix
+        # We want to extract: 10.xxxx/prefix.year.
+        prefix_patterns = []
+        for doi in normalized_dois:
+            # Match pattern: 10.xxxx/prefix.year.xxxxx
+            match = re.match(r"^(10\.\d+/[^/]+\.\d+)\.", doi)
+            if match:
+                prefix_patterns.append(match.group(1) + ".")
+
+        if not prefix_patterns:
+            return None
+
+        # Find the most common prefix pattern
+        from collections import Counter
+
+        prefix_counts = Counter(prefix_patterns)
+        most_common = prefix_counts.most_common(1)[0][0]
+
+        # Return normalized prefix (without URL) - just the identifier pattern
+        return most_common
+
     def correct_doi(self, article):
         """
-        Corrects the DOI field in the article.
+        Corrects or generates the DOI field in the article.
+        Uses extracted DOI if available, otherwise generates one using prefix.
+        Always stores DOI in normalized format (identifier only, no URL).
 
         Args:
             article (Article): Article object to correct.
         """
+        # If DOI already exists, normalize it and return
+        if hasattr(article, "doi") and article.doi and article.doi.strip():
+            article.doi = self._normalize_doi(article.doi)
+            return
+
+        # Only generate DOI if we have prefix and first_page
+        doi_prefix = self.doi_prefix or self.inferred_doi_prefix
+
+        if not doi_prefix:
+            print(
+                "Aviso: Não foi possível gerar DOI - prefixo não disponível e não foi possível inferir."
+            )
+            return
+
         if hasattr(article, "first_page") and article.first_page:
-            article.doi = f"{self.doi_prefix}{self.year}.{article.first_page}"
+            # Normalize prefix (remove URL if present)
+            clean_prefix = self._normalize_doi(doi_prefix)
+            if not clean_prefix:
+                # If prefix was in URL format, try to extract from it
+                clean_prefix = re.sub(r"^https?://(dx\.)?doi\.org/", "", doi_prefix)
+            clean_prefix = clean_prefix.rstrip("/")
+
+            # Generate DOI in normalized format (identifier only, no URL)
+            generated_doi = f"{clean_prefix}{self.year}.{article.first_page}"
+            article.doi = generated_doi
 
     def write_csv_by_workshop(self, articles_list, antes=True):
         """

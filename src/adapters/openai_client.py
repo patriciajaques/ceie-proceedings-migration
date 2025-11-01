@@ -56,18 +56,24 @@ class OpenAIClient(BaseAIClient):
             str: OpenAI API response.
         """
         try:
-            return_type = "json_object" if is_json else "text"
-
             # Build base parameters
             params = {
                 "model": self.model,
-                "response_format": {"type": return_type},
                 "messages": [
                     {"role": "system", "content": self.system_message},
                     {"role": "user", "content": user_message},
                 ],
                 "max_completion_tokens": 4000,
             }
+
+            # Some models (like gpt-5-nano) don't support json_object response_format
+            # Check if model supports json_object format before setting it
+            if is_json and self._supports_json_object():
+                params["response_format"] = {"type": "json_object"}
+            elif is_json:
+                # For models that don't support json_object, we'll rely on the prompt
+                # to instruct the model to return JSON (text format)
+                pass
 
             # Some newer models don't support custom temperature values
             # Only set temperature if the model is known to support it
@@ -97,3 +103,25 @@ class OpenAIClient(BaseAIClient):
             "o4-",
         ]
         return any(pattern in self.model for pattern in restricted_patterns)
+
+    def _supports_json_object(self):
+        """
+        Check if the model supports json_object response_format.
+
+        Some models like gpt-5-nano-* don't support the json_object response_format
+        and will return text even when requested. We need to handle this case.
+
+        Returns:
+            bool: True if the model supports json_object format.
+        """
+        # Models that don't support json_object format
+        unsupported_patterns = [
+            "gpt-5-nano-",
+        ]
+
+        # If model matches unsupported patterns, return False
+        if any(pattern in self.model for pattern in unsupported_patterns):
+            return False
+
+        # Default to supporting json_object for other models
+        return True

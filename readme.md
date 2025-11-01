@@ -230,7 +230,7 @@ def correct_affiliation_columns_from_authors_csv(self):
 - **OpenAI**: API client for GPT models
 - **Anthropic**: API client for Claude models
 - **PyPDF**: PDF processing
-- **PDFMiner**: Text extraction from PDFs
+- **PyMuPDF**: Text extraction from PDFs
 - **BeautifulSoup**: HTML parsing
 - **pandas**: Data manipulation
 - **numpy**: Numerical processing

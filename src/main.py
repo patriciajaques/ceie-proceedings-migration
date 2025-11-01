@@ -6,28 +6,29 @@ from src.adapters.ai_client_interface import AIClientInterface
 from src.services.article_extractor import ArticleExtractor
 from src.services.migrator import Migrator
 from src.logging.json_logger import JsonLogger
-from src.services.authors_affiliation_corrector import AuthorsAffiliationCorrector
 from src.utils.text_processor import TextProcessor
 import os
 from dotenv import load_dotenv
 from typing import Dict
 
 
-def create_ai_clients(config_loader: ConfigLoader, use_openai: bool) -> Dict[str, AIClientInterface]:
+def create_ai_clients(
+    config_loader: ConfigLoader, use_openai: bool
+) -> Dict[str, AIClientInterface]:
     """
     Creates AI client instances based on configuration.
     """
     client_class = OpenAIClient if use_openai else AnthropicClient
-    
+
     # Definir os tipos de clientes e seus respectivos prompts
     client_types = {
         "article_ai_client": "article_extraction",
         "references_ai_client": "references_extraction",
         "field_completion_ai_client": "field_completion",
         "affiliation_correction_client": "author_affiliation_correction",
-        "text_processing_client": "text_processing"
+        "text_processing_client": "text_processing",
     }
-    
+
     # Criar clientes para diferentes propósitos com diferentes prompts
     return {
         client_key: client_class(config_loader, prompt_key)
@@ -68,10 +69,6 @@ def main():
 
     migrator = Migrator(config_loader, article_extractor)
 
-    affiliation_corrector = AuthorsAffiliationCorrector(
-        config_loader, ai_clients["affiliation_correction_client"], article_extractor
-    )
-
     # Configuration for execution
     pages_to_process = config_loader.get_config_value("pages_to_process")
     files_to_download = config_loader.get_config_value("files_to_download")
@@ -81,10 +78,8 @@ def main():
 
     print(f"Migration completed successfully. Processed {len(articles)} articles.")
 
-    affiliation_corrector.correct_affiliation_columns_from_authors_csv()
-
 
 if __name__ == "__main__":
     # Clear the terminal screen
-    os.system('cls' if os.name == 'nt' else 'clear')
+    os.system("cls" if os.name == "nt" else "clear")
     main()
