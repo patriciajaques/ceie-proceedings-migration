@@ -214,13 +214,18 @@ class Migrator:
                 )
 
                 for attr, value in pdf_article.__dict__.items():
-                    # Skip certain fields we want to keep from website data
+                    # Skip certain fields we want to keep from website (Milanesa) data
                     if attr not in [
                         "id_jems",
                         "section_abbrev",
                         "first_page",
                         "num_pages",
                         "doi",  # Preserve DOI from website if available
+                        "title_orig",  # Preserve title from website (Milanesa)
+                        "title_en",  # Preserve English title (to be filled later)
+                        "authors",  # Preserve authors from website (Milanesa)
+                        "keywords_orig",  # Preserve keywords from website / later completion
+                        "keywords_en",
                     ]:
                         # Normalize DOI if it comes from PDF
                         if attr == "doi" and value:

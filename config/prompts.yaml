@@ -2,14 +2,14 @@ article_extraction: |
   Você deve atuar como um extrator de metadados detalhados de artigos científicos a partir de textos ASCII extraídos de arquivos PDF. O objetivo é extrair informações específicas sobre o artigo e os autores, e retornar no formato de um dicionário JSON. Extrair as informações diretamente do texto, evitando análises de conteúdo ou interpretações. Não retorne nenhuma informação adicional ou explicações. Observe que o texto não é uma versão parcial do artigo e pode ter problemas de reconhecimento de caracteres ASCII. Extraia as informações do texto fornecido mesmo assim. 
   1) Extração de Informações do Artigo:
   Extraia as informações a seguir, representando-as em um dicionário JSON. Utilize “” para dados ausentes e assegure a não truncagem ou abreviação dos textos:
-  - Título original em português (titleOrig).
-  - Título em inglês (titleEn). Caso ausente no texto do artigo, traduzir para inglês do campo "titleOrig".  Se "titleOrig" já estiver em inglês, deixar em inglês. 
-  - Resumo original  em português (abstractOrig); geralmente  vem após a palavra "Resumo" no texto. Obter todo o resumo do artigo sem truncar ou cortar partes. Não modificar o resumo original ou fazer correções do português.
-  - Resumo em inglês (abstractEn); Geralmente, se encontra após a palavra "abstract" no texto. Caso ausente no texto do artigo, traduzir do campo "abstractOrig".  Caso haja resumo no texto, extrair o resumo original sem modificar ou corrigir. 
-  - Palavras-chave em português (keywordsOrig); se ausente no texto do artigo, gerar de 3 a 5 palavras-chave em português a partir do resumo.
-  - Palavras-chave em inglês (keywordsEn). Se ausente, traduzir do campo "keywordsOrig".
+  - Título original na língua do artigo (titleOrig). A língua do artigo pode ser português (pt), espanhol (es) ou inglês (en).
+  - Título em inglês (titleEn). Caso ausente no texto do artigo, traduza para inglês o campo "titleOrig". Se o artigo já estiver em inglês, mantenha o mesmo título em "titleOrig" e "titleEn".
+  - Resumo original na língua do artigo (abstractOrig); geralmente vem após a palavra "Resumo" / "Resumen" / "Abstract" no texto. Obter todo o resumo do artigo sem truncar ou cortar partes. Não modificar o resumo original, não reescrever, não resumir, não parafrasear e não fazer correções linguísticas: copie literalmente o texto do resumo tal como aparece no artigo.
+  - Resumo em inglês (abstractEn); geralmente se encontra após a palavra "Abstract" no texto. Caso exista um resumo em inglês no texto do artigo, copiar esse resumo exatamente como está, sem modificar, sem resumir e sem parafrasear. Caso não exista um resumo em inglês, traduza o conteúdo do campo "abstractOrig" para inglês.
+  - Palavras-chave na língua do artigo (keywordsOrig); se ausentes no texto do artigo, gerar de 3 a 5 palavras‑chave nesse mesmo idioma com base no resumo.
+  - Palavras-chave em inglês (keywordsEn). Se ausente, traduzir do campo "keywordsOrig" para inglês.
   - DOI (doi): doi do artigo. Cuidado para não pegar o número da primeira página junto com o doi.
-  - Língua do artigo (language):  "pt". 
+  - Língua principal do artigo (language): detectar automaticamente e retornar "pt", "es" ou "en" conforme o texto do artigo. 
   2) Informações dos Autores:
   - Crie uma lista chamada authors, incluindo um dicionário para cada autor com:
   - Primeiro nome (authorFirstName).

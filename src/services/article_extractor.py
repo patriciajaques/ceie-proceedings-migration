@@ -79,7 +79,12 @@ class ArticleExtractor:
         # Update with additional information
         article_dict["num_pages"] = one_article_text["numPages"]
         article_dict["id_jems"] = one_article_text["base_filename"]
-        article_dict["language"] = "pt"
+
+        # Language:
+        # - Preferir o valor retornado pelo modelo em article_dict["language"]
+        # - Se o modelo não informar a língua, assumir "pt" como padrão
+        if not article_dict.get("language"):
+            article_dict["language"] = "pt"
 
         # Convert to Article object
         return Article.from_dict(article_dict)
