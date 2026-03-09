@@ -69,36 +69,35 @@ class AuthorsAffiliationCorrector:
         csv_path = f"{self.folder}/Autores.csv"
         return pd.read_csv(csv_path, delimiter=";")
 
-    # DISABLED: Método desabilitado para evitar geração de Autores_corrigido.csv
-    # def save_corrected_data(self, authors_df):
-    #     """
-    #     Save corrected authors data to CSV file.
-    #
-    #     Args:
-    #         authors_df (DataFrame): Corrected authors DataFrame
-    #     """
-    #     # Specify the column order
-    #     columns_order = [
-    #         "article",
-    #         "authorFirstName",
-    #         "authorMiddleName",
-    #         "authorLastName",
-    #         "authorAffiliation",
-    #         "authorAffiliationEn",
-    #         "authorCountry",
-    #         "authorEmail",
-    #         "orcid",
-    #         "order",
-    #     ]
-    #
-    #     # Reorder the DataFrame columns
-    #     authors_df = authors_df[columns_order]
-    #
-    #     # Remove duplicate rows
-    #     authors_df = authors_df.drop_duplicates()
-    #
-    #     # Generate the CSV file
-    #     authors_df.to_csv(f"{self.folder}/Autores_corrigido.csv", sep=";", index=False)
+    def save_corrected_data(self, authors_df):
+        """
+        Save corrected authors data to CSV file.
+
+        Args:
+            authors_df (DataFrame): Corrected authors DataFrame
+        """
+        # Specify the column order
+        columns_order = [
+            "article",
+            "authorFirstName",
+            "authorMiddleName",
+            "authorLastName",
+            "authorAffiliation",
+            "authorAffiliationEn",
+            "authorCountry",
+            "authorEmail",
+            "orcid",
+            "order",
+        ]
+
+        # Reorder the DataFrame columns
+        authors_df = authors_df[columns_order]
+
+        # Remove duplicate rows
+        authors_df = authors_df.drop_duplicates()
+
+        # Generate the CSV file
+        authors_df.to_csv(f"{self.folder}/Autores_corrigido.csv", sep=";", index=False)
 
     def convert_to_domain_objects(self, authors_df):
         """
@@ -215,8 +214,7 @@ class AuthorsAffiliationCorrector:
         print(f"\ndataframefinal:{authors_df}\n\n")
 
         # Save the corrected data
-        # DISABLED: Processo de correção desabilitado - Autores.csv já está correto
-        # self.save_corrected_data(authors_df)
+        self.save_corrected_data(authors_df)
 
         # Convert DataFrame to domain objects
         return self.convert_to_domain_objects(authors_df)

@@ -114,15 +114,7 @@ class Migrator:
             "articles_metadata_antes_do_field_completion", articles_dict_list
         )
 
-        # 6) Write article information to CSV files
-        # First, write all articles together
-        csv_writer = CsvWriter(
-            self.csv_save_dir, "Artigos.csv", "Autores.csv", "Referencias.csv", True
-        )
-        csv_writer.write_dicts_to_csv(articles_list)
-
-        # 7) Write CSV files separated by workshop/section
-        self.write_csv_by_workshop(articles_list, True)
+        # Note: CSV files will be generated after field completion in complete_missing_fields()
 
         return articles_list
 
@@ -157,14 +149,14 @@ class Migrator:
             "articles_metadata_apos_do_field_completion", updated_articles_dict
         )
 
-        # Write article information to CSV files
+        # Write article information to CSV files (final version after field completion)
         csv_writer = CsvWriter(
-            self.csv_save_dir, "Artigos.csv", "Autores.csv", "Referencias.csv", False
+            self.csv_save_dir, "Artigos.csv", "Autores.csv", "Referencias.csv", antes=False
         )
         csv_writer.write_dicts_to_csv(updated_articles)
 
         # Write CSV files separated by workshop/section
-        self.write_csv_by_workshop(updated_articles, False)
+        self.write_csv_by_workshop(updated_articles)
 
         return updated_articles
 
@@ -199,12 +191,12 @@ class Migrator:
                 if hasattr(pdf_article, "doi") and pdf_article.doi:
                     extracted_dois.append(pdf_article.doi)
 
-        # Infer DOI prefix from extracted DOIs if not provided in config
-        if not self.doi_prefix and extracted_dois:
+        # Infer DOI prefix from extracted DOIs
+        if extracted_dois:
             self.inferred_doi_prefix = self._infer_doi_prefix(extracted_dois)
             if self.inferred_doi_prefix:
                 print(
-                    f"Prefixo DOI inferido automaticamente: {self.inferred_doi_prefix}"
+                    f"Prefixo DOI inferido automaticamente a partir do site: {self.inferred_doi_prefix}"
                 )
 
         # Process each item in website_articles_data_list
@@ -291,7 +283,7 @@ class Migrator:
 
     def _infer_doi_prefix(self, dois):
         """
-        Infers the DOI prefix from a list of extracted DOIs.
+        Infers the DOI base prefix (without year/suffix) from a list of extracted DOIs.
 
         Args:
             dois (list): List of DOI strings.
@@ -315,15 +307,27 @@ class Migrator:
         if not normalized_dois:
             return None
 
-        # Find common prefix pattern
-        # DOI format is typically: 10.xxxx/prefix.year.suffix
-        # We want to extract: 10.xxxx/prefix.year.
+        # Find common base prefix pattern
+        # For DOIs like: 10.xxxx/prefix.year.suffix
+        # we want to extract a base prefix without year/suffix: 10.xxxx/prefix.
         prefix_patterns = []
         for doi in normalized_dois:
-            # Match pattern: 10.xxxx/prefix.year.xxxxx
-            match = re.match(r"^(10\.\d+/[^/]+\.\d+)\.", doi)
-            if match:
-                prefix_patterns.append(match.group(1) + ".")
+            if "/" not in doi:
+                continue
+
+            main_prefix, suffix_part = doi.split("/", 1)
+            parts = [p for p in suffix_part.split(".") if p]
+
+            # We expect at least: prefix.year.suffix
+            if len(parts) >= 3:
+                base_suffix = ".".join(parts[:-2])
+            elif len(parts) >= 1:
+                # Fallback: use only the first part after the slash
+                base_suffix = parts[0]
+            else:
+                continue
+
+            prefix_patterns.append(f"{main_prefix}/{base_suffix}.")
 
         if not prefix_patterns:
             return None
@@ -352,7 +356,8 @@ class Migrator:
             return
 
         # Only generate DOI if we have prefix and first_page
-        doi_prefix = self.doi_prefix or self.inferred_doi_prefix
+        # Prefer the prefix inferred from the website and use the config value as fallback
+        doi_prefix = self.inferred_doi_prefix or self.doi_prefix
 
         if not doi_prefix:
             print(
@@ -372,13 +377,12 @@ class Migrator:
             generated_doi = f"{clean_prefix}{self.year}.{article.first_page}"
             article.doi = generated_doi
 
-    def write_csv_by_workshop(self, articles_list, antes=True):
+    def write_csv_by_workshop(self, articles_list):
         """
         Writes CSV files separated by workshop/section.
 
         Args:
             articles_list (list): List of Article objects.
-            antes (bool): If True, adds 'antes_' prefix to filenames.
         """
         # Group articles by section
         workshops = {}
@@ -406,7 +410,7 @@ class Migrator:
                 f"{workshop_name}_Artigos.csv",
                 f"{workshop_name}_Autores.csv",
                 f"{workshop_name}_Referencias.csv",
-                antes,
+                antes=False,
             )
             csv_writer.write_dicts_to_csv(workshop_articles)
 

@@ -33,6 +33,7 @@ migracao-refatorado/
     ├── io/                     # Input/output operations
     ├── logging/                # Logging utilities
     ├── services/               # Core business logic
+    ├── temp/                   # Temporary files (all temp files must be created here)
     ├── utils/                  # Utility functions
     └── main.py                 # Application entry point
 ```
@@ -64,10 +65,13 @@ The service layer contains the core business logic:
 
 The system can use multiple AI services through a consistent interface:
 
-- **OpenAIClient**: Client for OpenAI's GPT services
-- **AnthropicClient**: Client for Anthropic's Claude services
+- **LangChainClient**: Unified client using LangChain as abstraction layer (recommended)
+- **OpenAIClient**: Direct client for OpenAI's GPT services
+- **AnthropicClient**: Direct client for Anthropic's Claude services
 
-Both clients implement the `AIClientInterface` and inherit from `BaseAIClient`.
+All clients implement the `AIClientInterface` and inherit from `BaseAIClient`.
+
+The system uses a **ModelFactory** that automatically detects the provider based on the model name and creates the appropriate client. By default, it uses LangChain for unified abstraction, making it easy to switch between providers and add new ones.
 
 ### Configuration Management
 
@@ -130,14 +134,19 @@ The application requires a `.env` file in the root directory with the following 
 ```
 OPENAI_API_KEY=your_openai_api_key_here
 ANTHROPIC_API_KEY=your_anthropic_api_key_here
-USE_OPENAI=true
+USE_LANGCHAIN=true
 ```
 
 These variables are used for:
 
 - `OPENAI_API_KEY`: OpenAI API key for GPT models
 - `ANTHROPIC_API_KEY`: Anthropic API key for Claude models
-- `USE_OPENAI`: Flag to choose between OpenAI or Anthropic (true/false)
+- `USE_LANGCHAIN`: Flag to use LangChain abstraction layer (true, recommended) or direct clients (false)
+
+**Note**: The provider is automatically detected from the model name in `config.json`. For example:
+- Models starting with `gpt-`, `o1-`, `o3-`, `o4-` → OpenAI
+- Models starting with `claude-`, `sonnet-` → Anthropic
+- Models starting with `gemini-`, `palm-` → Google (if langchain-google-genai is installed)
 
 ## Output
 
@@ -167,27 +176,28 @@ The program will:
 
 ## Implementation Details
 
-### AI Client Factory
+### Model Factory
 
-The application uses a factory function to create multiple AI clients with different prompts:
+The application uses a `ModelFactory` class to create AI clients with automatic provider detection:
 
 ```python
-def create_ai_clients(config_loader: ConfigLoader, use_openai: bool) -> Dict[str, AIClientInterface]:
-    client_class = OpenAIClient if use_openai else AnthropicClient
-    
-    client_types = {
-        "article_ai_client": "article_extraction",
-        "references_ai_client": "references_extraction",
-        "field_completion_ai_client": "field_completion",
-        "affiliation_correction_client": "author_affiliation_correction",
-        "text_processing_client": "text_processing"
-    }
-    
-    return {
-        client_key: client_class(config_loader, prompt_key)
-        for client_key, prompt_key in client_types.items()
-    }
+from src.adapters.model_factory import ModelFactory
+
+# Configure LangChain usage (default: True)
+ModelFactory.set_use_langchain(use_langchain=True)
+
+# Create all required clients
+# Provider is automatically detected from model name in config.json
+ai_clients = ModelFactory.create_all_clients(config_loader)
 ```
+
+The factory supports:
+- **Automatic provider detection** based on model name
+- **LangChain abstraction** for unified interface across providers
+- **Direct client creation** as fallback (when LangChain is disabled)
+- **Easy extension** to support new providers
+
+By default, the factory uses LangChain, which provides a unified interface for multiple providers (OpenAI, Anthropic, Google, Cohere, etc.) and makes it easier to switch between models without changing code.
 
 ### Text Processing
 
@@ -229,6 +239,10 @@ def correct_affiliation_columns_from_authors_csv(self):
 
 - **OpenAI**: API client for GPT models
 - **Anthropic**: API client for Claude models
+- **LangChain**: Unified abstraction layer for multiple LLM providers (recommended)
+- **langchain-openai**: OpenAI integration for LangChain
+- **langchain-anthropic**: Anthropic integration for LangChain
+- **langchain-community**: Community integrations for LangChain
 - **PyPDF**: PDF processing
 - **PyMuPDF**: Text extraction from PDFs
 - **BeautifulSoup**: HTML parsing
@@ -250,12 +264,43 @@ The codebase follows several key design principles:
    - **Interface Segregation**: Clean interfaces with minimal methods
    - **Dependency Inversion**: High-level modules depend on abstractions
 
+## Development Rules and Conventions
+
+### Temporary Files
+
+**IMPORTANT**: All temporary files created during program execution or development must be saved in the `src/temp/` directory.
+
+- All temporary files (cache, intermediate processing results, debug files, etc.) must be created in `src/temp/`
+- Temporary documentation files (analysis documents, flow diagrams, development notes, etc.) should also be placed in `src/temp/`
+- This directory is excluded from version control (via `.gitignore`)
+- The directory structure is preserved in git through a `.gitkeep` file
+- This ensures a clean repository while providing a standardized location for temporary files
+
+**Example usage:**
+```python
+import os
+temp_file_path = os.path.join(os.path.dirname(__file__), 'temp', 'my_temp_file.txt')
+```
+
 ## Extension Points
 
 The system can be extended in several ways:
 
-1. **New AI Providers**: Create a new class implementing `AIClientInterface`
+1. **New AI Providers**: 
+   - Via LangChain: Just install the corresponding langchain package (e.g., `langchain-google-genai`) and the factory will automatically detect it
+   - Direct implementation: Create a new class implementing `AIClientInterface` and register it in `ModelFactory`
 2. **Additional Data Sources**: Add new parsers in the services directory
 3. **Enhanced Domain Model**: Extend the domain classes with additional fields
 4. **Custom Text Processing**: Modify the TextProcessor class or provide alternatives
 5. **Output Formats**: Add new writers in the io directory
+
+### Adding a New Provider via LangChain
+
+To add support for a new provider through LangChain:
+
+1. Install the corresponding LangChain package: `pip install langchain-{provider}`
+2. Update `LangChainClient._detect_provider()` to recognize the new model patterns
+3. Add initialization logic in `LangChainClient.initialize_client()` for the new provider
+4. Update `LangChainClient.get_credentials_manager()` if needed for credential management
+
+The factory will automatically use the new provider when the model name matches the pattern.

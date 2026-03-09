@@ -1,7 +1,11 @@
-output/
 *.pyc
 .DS_Store
 __pycache__/
 .env
 venv/
 .envrc
+
+# Arquivos temporários
+src/temp/*
+!src/temp/.gitkeep
+output/

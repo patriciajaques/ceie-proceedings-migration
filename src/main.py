@@ -1,39 +1,12 @@
 # src/main.py
 from src.config.config_loader import ConfigLoader
-from src.adapters.openai_client import OpenAIClient
-from src.adapters.anthropic_client import AnthropicClient
-from src.adapters.ai_client_interface import AIClientInterface
+from src.adapters.model_factory import ModelFactory
 from src.services.article_extractor import ArticleExtractor
 from src.services.migrator import Migrator
 from src.logging.json_logger import JsonLogger
 from src.utils.text_processor import TextProcessor
 import os
 from dotenv import load_dotenv
-from typing import Dict
-
-
-def create_ai_clients(
-    config_loader: ConfigLoader, use_openai: bool
-) -> Dict[str, AIClientInterface]:
-    """
-    Creates AI client instances based on configuration.
-    """
-    client_class = OpenAIClient if use_openai else AnthropicClient
-
-    # Definir os tipos de clientes e seus respectivos prompts
-    client_types = {
-        "article_ai_client": "article_extraction",
-        "references_ai_client": "references_extraction",
-        "field_completion_ai_client": "field_completion",
-        "affiliation_correction_client": "author_affiliation_correction",
-        "text_processing_client": "text_processing",
-    }
-
-    # Criar clientes para diferentes propósitos com diferentes prompts
-    return {
-        client_key: client_class(config_loader, prompt_key)
-        for client_key, prompt_key in client_types.items()
-    }
 
 
 def main():
@@ -50,11 +23,14 @@ def main():
     # Initialize JsonLogger with configuration
     JsonLogger.initialize(config_loader)
 
-    # Determine which AI client to use based on environment variable
-    use_openai = os.getenv("USE_OPENAI", "true").lower() == "true"
+    # Configurar uso do LangChain (pode ser controlado por variável de ambiente)
+    # Por padrão, usa LangChain para abstração unificada
+    use_langchain = os.getenv("USE_LANGCHAIN", "true").lower() == "true"
+    ModelFactory.set_use_langchain(use_langchain)
 
-    # Create all required AI clients
-    ai_clients = create_ai_clients(config_loader, use_openai)
+    # Criar todos os clientes necessários usando a fábrica
+    # A fábrica detecta automaticamente o provedor baseado no nome do modelo no config.json
+    ai_clients = ModelFactory.create_all_clients(config_loader)
 
     # Create text processor with AI client
     text_processor = TextProcessor(ai_clients["text_processing_client"])
