@@ -110,7 +110,11 @@ class TextProcessor:
             """
         corrected_text = self.ai_client.create_completion(instruction, False)
         if not corrected_text:
-            print(f"Error processing text with AI.")
+            print(
+                "Error processing text with AI. "
+                "(Correção de encoding falhou; usando limpeza básica. "
+                "Pode ser limite de tokens, erro de rede ou resposta vazia.)"
+            )
             return self.basic_cleaning(text)
 
         return corrected_text

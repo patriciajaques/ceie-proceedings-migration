@@ -6,7 +6,7 @@
     "prompts_file": "config/prompts.yaml",
     "engine": "gpt-5-mini-2025-08-07",
     "pages_to_process": 11,
-    "files_to_download": 4,
+    "files_to_download": -1,
     "files_to_download_description": "Use -1 to download all files"
 }
 

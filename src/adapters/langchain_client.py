@@ -28,13 +28,14 @@ class LangChainClient(BaseAIClient):
         self.model_name = config_loader.get_config_value("engine")
         self.provider = self._detect_provider(self.model_name)
         
-        # Configurar max_tokens baseado no tipo de operação
-        # field_completion precisa de mais tokens porque processa registros completos
+        # Configurar max_tokens baseado no tipo de operação.
+        # Modelos de raciocínio (gpt-5-mini, o3, etc.) usam tokens para "reasoning"
+        # antes do JSON; precisam de espaço suficiente para ambos.
         if max_tokens is None:
             if prompt_key == "field_completion":
-                self.max_tokens = 8000  # Mais tokens para field completion
+                self.max_tokens = 8000  # Field completion pode precisar de mais
             else:
-                self.max_tokens = 4000  # Padrão para outras operações
+                self.max_tokens = 6000  # Extração: reasoning + JSON
         else:
             self.max_tokens = max_tokens
             
@@ -204,7 +205,10 @@ class LangChainClient(BaseAIClient):
                 )
             else:
                 print(f"\n\nError creating LangChain completion: {error_msg}")
-            return ""
+
+            # Neste projeto, falhas de conexão/execução com o modelo via LangChain
+            # devem abortar a execução em vez de retornar string vazia silenciosamente.
+            raise
 
     def _is_temperature_restricted_model(self) -> bool:
         """

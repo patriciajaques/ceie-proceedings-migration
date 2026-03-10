@@ -1,4 +1,5 @@
 # src/services/migrator.py
+import json
 from src.config.config_loader import ConfigLoader
 from src.services.pdf_downloader import PDFDownloader
 from src.utils.pdf_processor import PDFProcessor
@@ -89,10 +90,8 @@ class Migrator:
             save_files=False, number_of_pages_to_process=num_pages
         )
 
-        # 2) Extract article information from the website into a list of dictionaries
-        website_articles_data_list = self.parser.extract_articles_info_from_the_website(
-            num_files
-        )
+        # 2) Extract article information from the website (usa cache se existir)
+        website_articles_data_list = self._get_website_articles_data(num_files)
 
         # 2.5) Extract sections from the website and generate Secoes.csv
         sections_data = self.parser.extract_sections_from_website()
@@ -118,9 +117,66 @@ class Migrator:
 
         return articles_list
 
+    def _get_website_articles_data(self, num_files: int):
+        """
+        Obtém metadados dos artigos do site. Usa cache em execuções subsequentes
+        para evitar novas requisições HTTP ao site.
+        """
+        cache_path = os.path.join(
+            self.output_dir, str(self.year), "logs", "website_articles_cache.json"
+        )
+        try:
+            if os.path.exists(cache_path):
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                if isinstance(cached, list) and cached:
+                    print(
+                        f"Metadados do site carregados do cache ({len(cached)} artigos)"
+                    )
+                    if num_files != -1:
+                        return cached[:num_files]
+                    return cached
+        except (json.JSONDecodeError, IOError):
+            pass
+
+        # Sempre busca a lista completa para popular o cache
+        website_articles_data_list = self.parser.extract_articles_info_from_the_website(
+            -1
+        )
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(website_articles_data_list, f, ensure_ascii=False, indent=2)
+        if num_files != -1:
+            return website_articles_data_list[:num_files]
+        return website_articles_data_list
+
+    def _load_completion_cache(self):
+        """
+        Carrega o cache de field completion de execuções anteriores.
+        Retorna um dicionário {idJEMS: article_dict} para reutilizar artigos já processados.
+        """
+        try:
+            data = JsonLogger.read_json_file(
+                "articles_metadata_apos_do_field_completion.json"
+            )
+            if isinstance(data, dict) and "data" in data:
+                data = data["data"]
+            if isinstance(data, list):
+                return {
+                    (d.get("idJEMS") or d.get("id_jems", "")): d
+                    for d in data
+                    if d.get("idJEMS") or d.get("id_jems")
+                }
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass
+        return {}
+
     def complete_missing_fields(self, articles_list):
         """
         Completes missing fields in article metadata using AI.
+
+        Usa cache incremental: artigos já completados em execuções anteriores
+        são reutilizados e não passam pela IA novamente.
 
         Args:
             articles_list (list): List of Article objects containing article metadata.
@@ -138,9 +194,12 @@ class Migrator:
                 Article.from_dict(article_dict) for article_dict in articles_dict_list
             ]
 
-        # Complete missing fields in articles using AI
+        # Carrega cache de field completion de execuções anteriores (incremental)
+        completion_cache = self._load_completion_cache()
+
+        # Complete missing fields in articles using AI (usa cache para pular já processados)
         updated_articles = self.extractor.do_field_completion_of_missing_values_in_dic(
-            articles_list
+            articles_list, completion_cache=completion_cache
         )
 
         # Log article metadata after field completion (convert to dict for logging)

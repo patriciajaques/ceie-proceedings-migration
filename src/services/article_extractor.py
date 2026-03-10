@@ -1,9 +1,12 @@
 import json
+import os
 import re
+import datetime
 from typing import Dict, List, Optional
 from src.utils.text_processor import TextProcessor
 from src.domain.article import Article
 from src.adapters.ai_client_interface import AIClientInterface
+from src.logging.json_logger import JsonLogger
 
 
 class ArticleExtractor:
@@ -19,6 +22,7 @@ class ArticleExtractor:
         references_ai_client: AIClientInterface,
         field_completion_ai_client: AIClientInterface,
         text_processor: Optional[TextProcessor] = None,
+        extraction_cache_path: Optional[str] = None,
     ):
         """Initializes the article extractor.
 
@@ -28,16 +32,45 @@ class ArticleExtractor:
             field_completion_ai_client (AIClientInterface): AI client for completing missing fields.
             text_processor (TextProcessor, optional): Text processor for cleaning text.
                 If not provided, a new one will be created.
+            extraction_cache_path (str, optional): Path to JSON file for incremental extraction cache.
+                If provided, articles already extracted will be loaded from cache and skipped.
         """
         self.article_ai_client = article_ai_client
         self.references_ai_client = references_ai_client
         self.field_completion_ai_client = field_completion_ai_client
         self.text_processor = text_processor or TextProcessor()
+        self.extraction_cache_path = extraction_cache_path
+
+    def _load_extraction_cache(self) -> Dict[str, dict]:
+        """Carrega o cache de extração do disco, se existir."""
+        if not self.extraction_cache_path or not os.path.exists(self.extraction_cache_path):
+            return {}
+        try:
+            with open(self.extraction_cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "data" in data:
+                return data["data"]
+            if isinstance(data, dict):
+                return data
+            return {}
+        except (json.JSONDecodeError, IOError):
+            return {}
+
+    def _save_extraction_cache(self, cache: Dict[str, dict]) -> None:
+        """Persiste o cache de extração no disco."""
+        if not self.extraction_cache_path:
+            return
+        os.makedirs(os.path.dirname(self.extraction_cache_path), exist_ok=True)
+        with open(self.extraction_cache_path, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
 
     def extract_articles_data_from_PDF_text(
         self, all_files_text: List[Dict]
     ) -> List[Article]:
         """Extracts article data from PDF text.
+
+        Usa cache incremental: artigos já extraídos são carregados do disco e pulados.
+        O cache é salvo após cada artigo para permitir retomada em caso de interrupção.
 
         Args:
             all_files_text (list): List of dictionaries containing text extracted from PDFs.
@@ -46,10 +79,20 @@ class ArticleExtractor:
             list: List of Article objects with article metadata.
         """
         articles_list = []
+        cache = self._load_extraction_cache() if self.extraction_cache_path else {}
 
         for count, one_article_text in enumerate(all_files_text, start=1):
+            base_filename = one_article_text["base_filename"]
+            if base_filename in cache:
+                articles_list.append(Article.from_dict(cache[base_filename]))
+                print(f"\n\nProcessed article number {count} (from cache)\n")
+                continue
+
             article = self.extract_article_data(one_article_text)
             articles_list.append(article)
+            cache[base_filename] = article.to_dict()
+            if self.extraction_cache_path:
+                self._save_extraction_cache(cache)
             print(f"\n\nProcessed article number {count}\n")
 
         return articles_list
@@ -196,19 +239,37 @@ class ArticleExtractor:
         return self.extract_info_with_ai(self.references_ai_client, last_pages)
 
     def do_field_completion_of_missing_values_in_dic(
-        self, articles_list: List[Article]
+        self,
+        articles_list: List[Article],
+        completion_cache: Optional[Dict[str, dict]] = None,
     ) -> List[Article]:
         """Completes missing fields in article metadata.
 
+        Usa cache incremental: artigos já completados em execuções anteriores são
+        reutilizados e não passam pela IA novamente.
+
         Args:
             articles_list (list): List of Article objects with metadata.
+            completion_cache (dict, optional): Cache {idJEMS: article_dict} de execuções anteriores.
+                Se fornecido e o artigo estiver no cache, usa o valor em cache e pula a IA.
 
         Returns:
             list: Updated list of Article objects with completed fields.
         """
         updated_articles = []
+        completion_cache = completion_cache or {}
 
         for article in articles_list:
+            id_jems = article.id_jems or article.to_dict().get("idJEMS", "")
+            if id_jems in completion_cache:
+                cached_dict = completion_cache[id_jems]
+                # Só reutiliza o cache se o registro já estiver completo.
+                # Se ainda tiver campos vazios, deixa cair no fluxo normal
+                # para tentar novamente chamar a IA em execuções futuras.
+                if not self.has_empty_fields(cached_dict):
+                    updated_articles.append(Article.from_dict(cached_dict))
+                    continue
+
             # Convert to dictionary for AI compatibility
             article_dict = article.to_dict()
 
@@ -278,6 +339,9 @@ class ArticleExtractor:
         """
         json_info = ai_client.create_completion(instruction, True)
 
+        # Log bruto da chamada à IA (system prompt + user instruction + resposta) para depuração
+        self._log_ai_call(ai_client, instruction, json_info)
+
         try:
             return self.parse_ai_response(json_info)
         except (ValueError, json.JSONDecodeError) as e:
@@ -296,6 +360,38 @@ class ArticleExtractor:
 
             print("**** Failed after 3 attempts. Returning empty dictionary.")
             return {}
+
+    def _log_ai_call(
+        self, ai_client: AIClientInterface, instruction: str, response: str
+    ) -> None:
+        """
+        Registra em arquivo o prompt enviado à IA e a resposta bruta recebida.
+
+        O objetivo é permitir inspeção e depuração posteriores (por exemplo,
+        quando LangSmith não estiver ativo ou disponível).
+        """
+        try:
+            base_dir = JsonLogger.get_base_dir()
+            # Garante que o diretório de logs exista
+            os.makedirs(base_dir, exist_ok=True)
+
+            log_path = os.path.join(base_dir, "ai_calls.log.jsonl")
+            # Tentar obter o system prompt, se disponível
+            system_message = getattr(ai_client, "system_message", None)
+
+            log_entry = {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "system": system_message,
+                "instruction": instruction,
+                "response": response,
+            }
+
+            with open(log_path, "a", encoding="utf-8") as f:
+                json.dump(log_entry, f, ensure_ascii=False)
+                f.write("\n")
+        except Exception as e:
+            # Não interromper o fluxo principal em caso de erro de log
+            print(f"[AI LOG] Falha ao registrar chamada de IA: {e}")
 
     def parse_ai_response(self, json_info: str) -> Dict:
         """Parses the AI response and extracts JSON.

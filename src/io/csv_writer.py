@@ -2,6 +2,7 @@
 import csv
 import json
 import os
+import re
 from src.domain.article import Article
 from typing import List, Union, Dict, Any, Callable
 
@@ -110,8 +111,19 @@ class CsvWriter:
             if extra_data:
                 data.update(extra_data)
 
-            # Filter to include only fields in headers
-            return {key: data.get(key, "") for key in headers}
+            # Filter and sanitize only fields in headers
+            sanitized_data = {}
+            for key in headers:
+                value = data.get(key, "")
+                if isinstance(value, str):
+                    # Remover quebras de linha internas para evitar
+                    # que um único campo ocupe múltiplas linhas no CSV
+                    value = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+                    # Normalizar múltiplos espaços em um único
+                    value = re.sub(r"\s+", " ", value).strip()
+                sanitized_data[key] = value
+
+            return sanitized_data
 
         except AttributeError as e:
             print(f"Erro ao processar dados: {e}")

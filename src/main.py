@@ -1,11 +1,12 @@
 # src/main.py
 from src.config.config_loader import ConfigLoader
-from src.adapters.model_factory import ModelFactory
+from src.adapters.langchain_client import LangChainClient
 from src.services.article_extractor import ArticleExtractor
 from src.services.migrator import Migrator
 from src.logging.json_logger import JsonLogger
 from src.utils.text_processor import TextProcessor
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 
@@ -14,8 +15,10 @@ def main():
     Main entry point for the application.
     Initializes components and executes the migration process.
     """
-    # Load environment variables
-    load_dotenv()
+    # Load environment variables from project root .env
+    project_root = Path(__file__).resolve().parent.parent
+    env_path = project_root / ".env"
+    load_dotenv(dotenv_path=env_path)
 
     # Load configuration
     config_loader = ConfigLoader("config/config.json")
@@ -23,17 +26,26 @@ def main():
     # Initialize JsonLogger with configuration
     JsonLogger.initialize(config_loader)
 
-    # Configurar uso do LangChain (pode ser controlado por variável de ambiente)
-    # Por padrão, usa LangChain para abstração unificada
-    use_langchain = os.getenv("USE_LANGCHAIN", "true").lower() == "true"
-    ModelFactory.set_use_langchain(use_langchain)
-
-    # Criar todos os clientes necessários usando a fábrica
-    # A fábrica detecta automaticamente o provedor baseado no nome do modelo no config.json
-    ai_clients = ModelFactory.create_all_clients(config_loader)
+    # Clientes de IA via LangChain (um por tipo de prompt)
+    client_specs = {
+        "article_ai_client": "article_extraction",
+        "references_ai_client": "references_extraction",
+        "field_completion_ai_client": "field_completion",
+        "affiliation_correction_client": "author_affiliation_correction",
+        "text_processing_client": "text_processing",
+    }
+    ai_clients = {
+        key: LangChainClient(config_loader, prompt_key)
+        for key, prompt_key in client_specs.items()
+    }
 
     # Create text processor with AI client
     text_processor = TextProcessor(ai_clients["text_processing_client"])
+
+    # Caminho do cache de extração para execução incremental
+    output_dir = config_loader.get_config_value("output_dir")
+    year = config_loader.get_config_value("year")
+    extraction_cache_path = os.path.join(output_dir, str(year), "logs", "extraction_cache.json")
 
     # Initialize the article extractor with AI clients and text processor
     article_extractor = ArticleExtractor(
@@ -41,6 +53,7 @@ def main():
         ai_clients["references_ai_client"],
         ai_clients["field_completion_ai_client"],
         text_processor,
+        extraction_cache_path=extraction_cache_path,
     )
 
     migrator = Migrator(config_loader, article_extractor)

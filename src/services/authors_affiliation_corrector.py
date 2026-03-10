@@ -222,12 +222,12 @@ class AuthorsAffiliationCorrector:
 
 # DISABLED: Bloco __main__ desabilitado para evitar execução acidental
 # if __name__ == "__main__":
-#     from src.adapters.openai_client import OpenAIClient
+#     from src.adapters.langchain_client import LangChainClient
 #     from src.config.config_loader import ConfigLoader
 #     from src.services.article_extractor import ArticleExtractor
 #
 #     config_loader = ConfigLoader("config/config.json")
-#     ai_client = OpenAIClient(config_loader, "author_affiliation_correction")
+#     ai_client = LangChainClient(config_loader, "author_affiliation_correction")
 #     article_extractor = ArticleExtractor(ai_client, ai_client, ai_client)
 #     corrector = AuthorsAffiliationCorrector(config_loader, ai_client, article_extractor)
 #     corrector.correct_affiliation_columns_from_authors_csv()
