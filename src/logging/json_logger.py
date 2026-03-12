@@ -2,6 +2,7 @@
 import json
 import os
 import datetime
+from typing import Optional
 from src.config.config_loader import ConfigLoader
 
 
@@ -99,6 +100,43 @@ class JsonLogger:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
 
         return file_path
+
+    @classmethod
+    def log_ai_call(
+        cls,
+        step: str,
+        instruction: str,
+        response: str,
+        system_message: Optional[str] = None,
+    ) -> None:
+        """
+        Registra uma chamada à IA em ai_calls.log.jsonl com etapa explícita.
+
+        Permite identificar no log e no LangSmith se a chamada foi
+        text_processing, field_completion, article_extraction, etc.
+
+        Args:
+            step: Nome da etapa (ex.: "text_processing", "field_completion").
+            instruction: Conteúdo enviado ao modelo (user message).
+            response: Resposta bruta do modelo.
+            system_message: Conteúdo do system prompt (opcional).
+        """
+        try:
+            target_dir = cls.get_base_dir()
+            os.makedirs(target_dir, exist_ok=True)
+            log_path = os.path.join(target_dir, "ai_calls.log.jsonl")
+            log_entry = {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "step": step,
+                "system": system_message,
+                "instruction": instruction,
+                "response": response,
+            }
+            with open(log_path, "a", encoding="utf-8") as f:
+                json.dump(log_entry, f, ensure_ascii=False)
+                f.write("\n")
+        except Exception:
+            pass  # não interromper o fluxo principal
 
     @classmethod
     def read_json_file(cls, file_name, directory=None):

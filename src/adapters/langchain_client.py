@@ -15,30 +15,17 @@ class LangChainClient(BaseAIClient):
     Suporta OpenAI, Anthropic, Google, Cohere e outros através do LangChain.
     """
 
-    def __init__(self, config_loader: ConfigLoader, prompt_key: str, max_tokens: int = None):
+    def __init__(self, config_loader: ConfigLoader, prompt_key: str):
         """
         Initialize the LangChain client.
 
         Args:
             config_loader (ConfigLoader): Configuration loader instance.
             prompt_key (str): Key for the prompt to be loaded.
-            max_tokens (int, optional): Maximum tokens for completion. 
-                Defaults to None (uses 4000 for regular operations, 8000 for field_completion).
         """
         self.model_name = config_loader.get_config_value("engine")
         self.provider = self._detect_provider(self.model_name)
-        
-        # Configurar max_tokens baseado no tipo de operação.
-        # Modelos de raciocínio (gpt-5-mini, o3, etc.) usam tokens para "reasoning"
-        # antes do JSON; precisam de espaço suficiente para ambos.
-        if max_tokens is None:
-            if prompt_key == "field_completion":
-                self.max_tokens = 8000  # Field completion pode precisar de mais
-            else:
-                self.max_tokens = 6000  # Extração: reasoning + JSON
-        else:
-            self.max_tokens = max_tokens
-            
+        self.max_tokens = config_loader.get_config_value("max_tokens", default=10000)
         super().__init__(config_loader, prompt_key)
 
     def _detect_provider(self, model_name: str) -> str:
@@ -94,57 +81,53 @@ class LangChainClient(BaseAIClient):
         Returns:
             BaseChatModel: Cliente LangChain inicializado.
         """
-        # Parâmetros comuns
-        common_params = {
+        # Parâmetros comuns (max_tokens usa o default do modelo)
+        common_params: dict = {
             "temperature": 0,
-            "max_tokens": self.max_tokens,
         }
 
+        client: BaseChatModel
         if self.provider == "openai":
             # Verificar se o modelo suporta temperature customizada
             if self._is_temperature_restricted_model():
                 common_params.pop("temperature", None)
-
             client = ChatOpenAI(
                 model=self.model_name,
                 api_key=self.api_key,
                 **common_params,
             )
-            return client
         elif self.provider == "anthropic":
-            client = ChatAnthropic(
+            client = ChatAnthropic(  # type: ignore[call-arg]
                 model=self.model_name,
                 api_key=self.api_key,
                 **common_params,
             )
-            return client
         elif self.provider == "google":
             try:
-                from langchain_google_genai import ChatGoogleGenerativeAI
+                from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore[import-untyped]
 
                 client = ChatGoogleGenerativeAI(
                     model=self.model_name,
                     google_api_key=self.api_key,
                     **common_params,
                 )
-                return client
             except ImportError:
                 print(
                     "Aviso: langchain-google-genai não está instalado. "
                     "Usando OpenAI como fallback."
                 )
-                return ChatOpenAI(
+                client = ChatOpenAI(
                     model=self.model_name,
                     api_key=self.api_key,
                     **common_params,
                 )
         else:
-            # Fallback para OpenAI
-            return ChatOpenAI(
+            client = ChatOpenAI(
                 model=self.model_name,
                 api_key=self.api_key,
                 **common_params,
             )
+        return client
 
     def create_completion(self, user_message: str, is_json: bool = False) -> str:
         """
@@ -173,6 +156,13 @@ class LangChainClient(BaseAIClient):
                     client_to_use = self.client.bind(
                         response_format={"type": "json_object"}
                     )
+                else:
+                    # Modelo não suporta json_object (ex.: gpt-5-mini); reforçar no prompt
+                    user_message = (
+                        f"{user_message}\n\nRetorne a resposta APENAS em formato JSON válido "
+                        "(um único objeto), sem texto antes ou depois."
+                    )
+                    messages[1] = HumanMessage(content=user_message)
             elif is_json and self.provider == "anthropic":
                 # Anthropic não tem JSON mode direto, mas podemos instruir via prompt
                 user_message = f"{user_message}\n\nRetorne a resposta APENAS em formato JSON válido."
@@ -182,15 +172,13 @@ class LangChainClient(BaseAIClient):
             
             # Verificar se a resposta está vazia ou None
             if not response or not response.content:
-                # Verificar se foi por limite de tokens (reasoning tokens esgotados)
-                if hasattr(response, 'response_metadata') and response.response_metadata:
-                    usage = response.response_metadata.get('usage')
-                    if usage and hasattr(usage, 'completion_tokens'):
-                        if usage.completion_tokens >= self.max_tokens:
-                            print(
-                                f"\n\nWarning: Response limit reached ({usage.completion_tokens}/{self.max_tokens} tokens). "
-                                f"Consider increasing max_tokens for this operation."
-                            )
+                if hasattr(response, "response_metadata") and response.response_metadata:
+                    usage = response.response_metadata.get("usage")
+                    if usage and getattr(usage, "completion_tokens", None) is not None:
+                        print(
+                            f"\n\nWarning: Resposta vazia (completion_tokens: {usage.completion_tokens}). "
+                            "Pode ser limite de tokens do modelo."
+                        )
                 return ""
             
             return response.content
@@ -199,10 +187,7 @@ class LangChainClient(BaseAIClient):
             error_msg = str(e)
             # Detectar se o erro é relacionado a limite de tokens
             if "length limit" in error_msg.lower() or "token" in error_msg.lower():
-                print(
-                    f"\n\nError: Token limit reached. Max tokens: {self.max_tokens}. "
-                    f"Error details: {error_msg}"
-                )
+                print(f"\n\nError: Limite de tokens. Detalhes: {error_msg}")
             else:
                 print(f"\n\nError creating LangChain completion: {error_msg}")
 
@@ -240,6 +225,7 @@ class LangChainClient(BaseAIClient):
         # Models that don't support json_object format
         unsupported_patterns = [
             "gpt-5-nano-",
+            "gpt-5-mini-",  # não respeita response_format json_object; usar instrução no prompt
         ]
 
         # If model matches unsupported patterns, return False

@@ -1,0 +1,137 @@
+---
+description: Regras de idioma e padrões de código para o projeto ESG Benchmarking
+globs: ["**/*.py", "**/*.js", "**/*.ts", "**/*.md"]
+alwaysApply: true
+---
+
+# Modo de Trabalho Colaborativo
+
+## Fluxo de Desenvolvimento Obrigatório
+
+### 1. FASE DE EXPLORAÇÃO E SUGESTÕES
+
+- **SEMPRE** apresentar múltiplas opções/abordagens para qualquer tarefa
+- Explicar prós e contras de cada abordagem
+- Aguardar decisão do usuário sobre qual direção seguir
+- **NUNCA** implementar sem aprovação explícita
+
+### 2. FASE DE PLANEJAMENTO
+
+- Após decisão, criar planejamento passo a passo detalhado
+- Listar cada etapa com clareza
+- Aguardar confirmação do planejamento antes de implementar
+
+### 3. FASE DE IMPLEMENTAÇÃO ITERATIVA
+
+- Implementar **UM PASSO POR VEZ**
+- Após cada passo:
+  - Verificar se o usuário está de acordo
+  - Testar a implementação
+  - Aguardar confirmação antes do próximo passo
+- **NUNCA** implementar múltiplos passos simultaneamente
+
+### 4. VERIFICAÇÃO CONTÍNUA
+
+- Sempre perguntar: "Está de acordo com este passo?"
+- Testar antes de prosseguir
+- Ajustar conforme feedback do usuário
+
+## Perguntas Obrigatórias
+
+- "Você tem preferência por alguma dessas abordagens?"
+- "Devo prosseguir com esta implementação?"
+- "Está de acordo com este passo?"
+
+# Regras de Idioma
+
+## Comunicação
+
+- **Comunicação com o usuário**: sempre em português
+- **Mensagens exibidas para o usuário** (prints, logs, mensagens de erro): português
+- **Textos de interface do usuário**: português
+
+## Código e Documentação
+
+- **Documentação de código** (docstrings, comentários): inglês
+- **Nomes de identificadores** (variáveis, classes, funções, métodos): inglês
+- **Convenções de nomenclatura**: seguir padrões internacionais
+
+# Coding Standards
+
+## Naming Conventions
+
+### Files and Directories
+
+- Use `snake_case` for file and directory names
+- File names should reflect the main class name (e.g., `benchmark_controller.py` for `BenchmarkController`)
+
+### Python Code
+
+- `snake_case` for variables, functions, and modules
+- `PascalCase` for classes
+- `UPPER_CASE` for constants
+- Descriptive and self-explanatory names
+
+## Documentation
+
+### Docstrings
+
+```python
+def process_document(
+    document_path: str,
+    company_code: str
+) -> Dict[str, Any]:
+    """
+    Process an ESG report document.
+
+    Args:
+        document_path: Path to the document file
+        company_code: Company code
+
+    Returns:
+        Dictionary containing processed sections
+
+    Raises:
+        DocumentProcessingError: If processing fails
+    """
+```
+
+### Comments
+
+- Comments in English
+- Explain the "why" not the "what"
+- Keep comments up to date
+
+## Type Hints
+
+- Use type hints in all functions
+- Define types for parameters and returns
+- Use `Any` only when necessary
+
+## Code Organization
+
+- Maximum 79 characters per line
+- 4 spaces for indentation
+- Whitespace after commas
+- Blank line between functions and classes
+- Import order:
+  1. Standard library
+  2. Third-party
+  3. Local application
+
+## Git Commit Messages
+
+- **Language**: Always in English
+- **Format**: Follow Conventional Commits specification
+- **Style**: Concise and descriptive
+- **Structure**: `type: description`
+  - `feat`: New feature
+  - `fix`: Bug fix
+  - `refactor`: Code refactoring
+  - `docs`: Documentation changes
+  - `test`: Test-related changes
+  - `chore`: Maintenance tasks
+- **Examples**:
+  - `feat: add checkpoint validation system`
+  - `fix: resolve memory leak in data processing`
+  - `refactor: centralize checkpoint files in organized structure`

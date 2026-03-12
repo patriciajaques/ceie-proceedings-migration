@@ -1,5 +1,5 @@
 # src/adapters/base_ai_client.py
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from src.adapters.ai_client_interface import AIClientInterface
 from src.config.config_loader import ConfigLoader
 from src.config.credentials_manager_interface import CredentialsManagerInterface
@@ -21,6 +21,7 @@ class BaseAIClient(AIClientInterface):
             config_loader (ConfigLoader): Configuration loader instance.
             prompt_key (str): Key for the prompt to be loaded.
         """
+        self.prompt_key = prompt_key
         # Load prompt from YAML file
         self.system_message = config_loader.load_prompt(prompt_key)
 

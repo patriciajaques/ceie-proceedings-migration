@@ -1,0 +1,105 @@
+---
+description: Regras de desacoplamento de serviços para integração com API - Contratos Pydantic, Encapsulamento e Injeção de Dependência
+globs: ["**/*service*.py", "**/*agent*.py", "**/graph/**/*.py"]
+alwaysApply: true
+---
+
+# Architecture Rules: Service Decoupling for API Integration
+
+## Overview
+
+Rules for decoupling AI services (LangChain/LangGraph) from API layers. Apply to **all new services and agents**.
+
+## Core Principles
+
+### 1. Data Contracts with Pydantic
+
+**Rule**: Define Pydantic models for ALL service inputs and outputs.
+
+```python
+# Input Model
+class BenchmarkingServiceInput(BaseModel):
+    theme: str
+    materiality_type: str
+    topic: str
+    question: str
+    company_code: str
+    top_k: Optional[int] = None
+    score_threshold: Optional[float] = None
+
+# Output Model
+class BenchmarkingServiceOutput(BaseModel):
+    company_code: str
+    theme: str
+    answer_summary: str
+    score_info: Dict[str, Any]
+    execution_info: Dict[str, Any]
+```
+
+**Why**: API team uses same Pydantic models in FastAPI → automatic Swagger docs + validation.
+
+### 2. Service Encapsulation
+
+**Rule**: Encapsulate LangGraph pipelines in service classes with ONE main method.
+
+```python
+class BenchmarkingService:
+    def __init__(self, pipeline, vector_search, llm_service):
+        """Receive dependencies via constructor."""
+        self.pipeline = pipeline
+        self.vector_search = vector_search
+        self.llm_service = llm_service
+
+    def generate_benchmarking(
+        self,
+        data: BenchmarkingServiceInput
+    ) -> BenchmarkingServiceOutput:
+        """Single entry point - API team only needs this method."""
+        result = self.pipeline.run_single(...)
+        return BenchmarkingServiceOutput(...)
+```
+
+**Why**: API developer only needs ONE class and ONE method. No LangGraph internals knowledge required.
+
+### 3. Dependency Injection
+
+**Rule**: Receive dependencies in `__init__`, do NOT initialize them internally.
+
+```python
+# ✅ CORRECT
+def __init__(self, pipeline, vector_search, llm_service):
+    self.pipeline = pipeline
+    self.vector_search = vector_search
+    self.llm_service = llm_service
+
+# ❌ INCORRECT
+def __init__(self):
+    self.vector_search = VectorSearchService()  # Don't do this
+    self.llm_service = BenchmarkingLLMService()  # Don't do this
+```
+
+**Why**: Enables mocking for tests, allows FastAPI to manage connection lifecycle.
+
+## Quick Checklist
+
+Before creating a new service:
+
+- [ ] Input Pydantic model with ALL input parameters
+- [ ] Output Pydantic model with ALL output fields
+- [ ] Service class encapsulates graph/pipeline
+- [ ] Single main method (e.g., `generate_*`, `process_*`, `collect_*`)
+- [ ] All dependencies injected in `__init__` (no internal initialization)
+- [ ] Type hints on all parameters and returns
+
+## FastAPI Integration Example
+
+```python
+@app.post("/benchmarking", response_model=BenchmarkingServiceOutput)
+def create_benchmarking(
+    data: BenchmarkingServiceInput,
+    service: BenchmarkingService = Depends(get_service)
+):
+    return service.generate_benchmarking(data)
+```
+
+Same Pydantic models = automatic Swagger documentation!

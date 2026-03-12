@@ -4,7 +4,9 @@
     "output_dir": "output/",
     "doi_prefix": "10.5753/cbie.sbie.",
     "prompts_file": "config/prompts.yaml",
-    "engine": "gpt-5-mini-2025-08-07",
+    "engine": "gpt-5-nano-2025-08-07",
+    "engine_description": "GPT-5 Nano (usamos GPT 5 mini anteriormente, mas o modelo nano é mais rápido e barato e apresenta resultados de qualidade semelhante)",
+    "max_tokens": 10000,
     "pages_to_process": 11,
     "files_to_download": -1,
     "files_to_download_description": "Use -1 to download all files"

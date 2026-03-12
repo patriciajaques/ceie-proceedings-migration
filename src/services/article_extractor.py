@@ -71,6 +71,8 @@ class ArticleExtractor:
 
         Usa cache incremental: artigos já extraídos são carregados do disco e pulados.
         O cache é salvo após cada artigo para permitir retomada em caso de interrupção.
+        O cache não é reduzido quando se roda com menos arquivos: mantém todos os artigos
+        já processados para recuperação e retomada.
 
         Args:
             all_files_text (list): List of dictionaries containing text extracted from PDFs.
@@ -238,26 +240,40 @@ class ArticleExtractor:
         """
         return self.extract_info_with_ai(self.references_ai_client, last_pages)
 
+    def _needs_pdf_text_for_completion(self, article_dict: Dict) -> bool:
+        """Verifica se o artigo não tem resumo/abstract e se a IA precisaria do texto do PDF."""
+        abstract_orig = (article_dict.get("abstractOrig") or "").strip()
+        abstract_en = (article_dict.get("abstractEn") or "").strip()
+        return not abstract_orig and not abstract_en
+
     def do_field_completion_of_missing_values_in_dic(
         self,
         articles_list: List[Article],
         completion_cache: Optional[Dict[str, dict]] = None,
+        pdf_raw_by_id: Optional[Dict[str, str]] = None,
     ) -> List[Article]:
         """Completes missing fields in article metadata.
 
         Usa cache incremental: artigos já completados em execuções anteriores são
         reutilizados e não passam pela IA novamente.
 
+        Quando o artigo não tem resumo (abstractOrig/abstractEn), e há texto bruto do PDF
+        em pdf_raw_by_id, chama clean_text apenas para esse artigo e envia à IA para
+        extrair resumo e palavras-chave (mesmo padrão da fase 1: corrige só quando vai usar).
+
         Args:
             articles_list (list): List of Article objects with metadata.
             completion_cache (dict, optional): Cache {idJEMS: article_dict} de execuções anteriores.
                 Se fornecido e o artigo estiver no cache, usa o valor em cache e pula a IA.
+            pdf_raw_by_id (dict, optional): Mapa id_jems -> texto bruto das primeiras páginas.
+                clean_text é chamado só para o artigo que for completar, quando precisar do texto.
 
         Returns:
             list: Updated list of Article objects with completed fields.
         """
         updated_articles = []
         completion_cache = completion_cache or {}
+        pdf_raw_by_id = pdf_raw_by_id or {}
 
         for article in articles_list:
             id_jems = article.id_jems or article.to_dict().get("idJEMS", "")
@@ -282,7 +298,8 @@ class ArticleExtractor:
                 print(
                     f"Improving article record with seq "
                     f"{article_dict.get('seq')} and idJEMS: "
-                    f"{article_dict.get('idJEMS')}"
+                    f"{article_dict.get('idJEMS')}",
+                    flush=True,
                 )
 
                 # Remove fields that don't need to be sent to AI
@@ -290,8 +307,33 @@ class ArticleExtractor:
                 clean_dict.pop("firstPages", None)
                 clean_dict.pop("lastPages", None)
 
+                instruction = json.dumps(clean_dict)
+                if self._needs_pdf_text_for_completion(clean_dict) and pdf_raw_by_id.get(id_jems):
+                    # clean_text só para este artigo (igual à fase 1: corrige quando vai usar)
+                    raw_text = pdf_raw_by_id[id_jems]
+                    pdf_text = self.text_processor.clean_text(raw_text)
+                    instruction = (
+                        instruction
+                        + "\n\n[Os campos de resumo (abstractOrig, abstractEn) estão vazios. "
+                        "Use o texto das primeiras páginas do artigo abaixo para extrair ou redigir "
+                        "um resumo em português e em inglês e, a partir dele, preencher as palavras-chave "
+                        "(keywordsOrig e keywordsEn).]\n\n--- Texto das primeiras páginas do artigo ---\n\n"
+                        + (pdf_text[:15000] if len(pdf_text) > 15000 else pdf_text)
+                        + "\n\n--- Fim do texto ---\n\n"
+                        "IMPORTANTE: Sua resposta deve ser EXCLUSIVAMENTE o dicionário JSON completo "
+                        "(com todas as chaves: seq, titleOrig, titleEn, abstractOrig, abstractEn, keywordsOrig, "
+                        "keywordsEn, etc.). Não inclua texto do artigo nem explicações antes ou depois do JSON."
+                    )
+                    print("  (incluído texto do PDF para extração de resumo e palavras-chave)", flush=True)
+                else:
+                    instruction = (
+                        instruction
+                        + "\n\nRetorne APENAS o dicionário JSON completo com os campos preenchidos, "
+                        "sem nenhum texto antes ou depois."
+                    )
+
                 new_dict = self.extract_info_with_ai(
-                    self.field_completion_ai_client, json.dumps(clean_dict)
+                    self.field_completion_ai_client, instruction
                 )
 
                 if new_dict and isinstance(new_dict, dict):
@@ -337,19 +379,22 @@ class ArticleExtractor:
         Returns:
             dict: Dictionary with extracted information.
         """
+        step = getattr(ai_client, "prompt_key", "unknown")
+        print(f"  [LLM] Etapa: {step} ...", flush=True)
         json_info = ai_client.create_completion(instruction, True)
 
-        # Log bruto da chamada à IA (system prompt + user instruction + resposta) para depuração
+        # Log bruto da chamada à IA (com step explícito para depuração e LangSmith)
         self._log_ai_call(ai_client, instruction, json_info)
 
         try:
             return self.parse_ai_response(json_info)
         except (ValueError, json.JSONDecodeError) as e:
-            print(f"\n\n\n**** Error decoding JSON: {e} ***")
+            print(f"\n\n**** Error decoding JSON: {e} ****", flush=True)
             response_preview = json_info[:500] if json_info else "None"
             print(
                 f"**** Response received from model (first 500 chars): "
-                f"{response_preview} *** \n\n\n"
+                f"{response_preview} ****\n\n",
+                flush=True,
             )
 
             # Try again with recursion limit
@@ -358,7 +403,7 @@ class ArticleExtractor:
                     ai_client, instruction, recursion_count + 1
                 )
 
-            print("**** Failed after 3 attempts. Returning empty dictionary.")
+            print("**** Failed after 3 attempts. Returning empty dictionary. ****", flush=True)
             return {}
 
     def _log_ai_call(
@@ -367,31 +412,44 @@ class ArticleExtractor:
         """
         Registra em arquivo o prompt enviado à IA e a resposta bruta recebida.
 
-        O objetivo é permitir inspeção e depuração posteriores (por exemplo,
-        quando LangSmith não estiver ativo ou disponível).
+        Inclui o campo "step" com o prompt_key do cliente (ex.: field_completion,
+        article_extraction) para identificar a etapa no log e no LangSmith.
         """
-        try:
-            base_dir = JsonLogger.get_base_dir()
-            # Garante que o diretório de logs exista
-            os.makedirs(base_dir, exist_ok=True)
+        step = getattr(ai_client, "prompt_key", "unknown")
+        system_message = getattr(ai_client, "system_message", None)
+        JsonLogger.log_ai_call(
+            step=step,
+            instruction=instruction,
+            response=response,
+            system_message=system_message,
+        )
 
-            log_path = os.path.join(base_dir, "ai_calls.log.jsonl")
-            # Tentar obter o system prompt, se disponível
-            system_message = getattr(ai_client, "system_message", None)
-
-            log_entry = {
-                "timestamp": datetime.datetime.now().isoformat(),
-                "system": system_message,
-                "instruction": instruction,
-                "response": response,
-            }
-
-            with open(log_path, "a", encoding="utf-8") as f:
-                json.dump(log_entry, f, ensure_ascii=False)
-                f.write("\n")
-        except Exception as e:
-            # Não interromper o fluxo principal em caso de erro de log
-            print(f"[AI LOG] Falha ao registrar chamada de IA: {e}")
+    def _extract_json_from_text(self, text: str) -> str:
+        """Extrai um bloco JSON de texto que pode conter conteúdo antes/depois."""
+        if not text or not text.strip():
+            raise ValueError("Resposta vazia")
+        text = text.strip()
+        # 1) Se existir bloco ```json ... ```, usar só o conteúdo entre as marcas
+        if "```" in text:
+            parts = text.split("```")
+            for j, part in enumerate(parts):
+                if part.strip().lower().startswith("json"):
+                    part = part.split("\n", 1)[-1] if "\n" in part else part[4:]
+                    text = part.strip()
+                    break
+        # 2) Encontra o primeiro { e extrai o objeto por balanceamento de chaves
+        start = text.find("{")
+        if start == -1:
+            raise ValueError("Nenhum objeto JSON encontrado na resposta")
+        depth = 0
+        for i, c in enumerate(text[start:], start=start):
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        raise ValueError("Objeto JSON incompleto (chaves não balanceadas)")
 
     def parse_ai_response(self, json_info: str) -> Dict:
         """Parses the AI response and extracts JSON.
@@ -406,10 +464,5 @@ class ArticleExtractor:
             ValueError: If valid JSON cannot be found.
             json.JSONDecodeError: If the found JSON is not valid.
         """
-        # Find the JSON part of the string
-        match = re.search(r"\{.*\}|\[.*\]", json_info, re.DOTALL)
-        if not match:
-            raise ValueError("Could not find valid JSON in the response")
-
-        # Convert JSON string to dictionary
-        return json.loads(match.group())
+        json_str = self._extract_json_from_text(json_info)
+        return json.loads(json_str)

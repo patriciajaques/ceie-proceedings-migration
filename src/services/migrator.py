@@ -113,6 +113,9 @@ class Migrator:
             "articles_metadata_antes_do_field_completion", articles_dict_list
         )
 
+        # Guardar dados dos PDFs para uso no field completion (quando resumo estiver vazio)
+        self._last_pdf_files_data = all_files_data
+
         # Note: CSV files will be generated after field completion in complete_missing_fields()
 
         return articles_list
@@ -171,6 +174,23 @@ class Migrator:
             pass
         return {}
 
+    def _build_pdf_raw_by_id(self):
+        """
+        Constrói um dicionário id_jems (base_filename) -> texto bruto das primeiras páginas.
+        Sem clean_text aqui: a correção é feita só no artigo que for usar (no field completion).
+        """
+        raw_by_id = {}
+        pdf_files_data = getattr(self, "_last_pdf_files_data", None)
+        if not pdf_files_data:
+            return raw_by_id
+        for item in pdf_files_data:
+            base_filename = item.get("base_filename", "")
+            if not base_filename:
+                continue
+            first_pages = self.extractor.extract_pages(item, "first")
+            raw_by_id[base_filename] = first_pages
+        return raw_by_id
+
     def complete_missing_fields(self, articles_list):
         """
         Completes missing fields in article metadata using AI.
@@ -197,9 +217,14 @@ class Migrator:
         # Carrega cache de field completion de execuções anteriores (incremental)
         completion_cache = self._load_completion_cache()
 
+        # Mapa id_jems -> texto bruto (sem clean_text); clean_text só é chamado por artigo ao usar
+        pdf_raw_by_id = self._build_pdf_raw_by_id()
+
         # Complete missing fields in articles using AI (usa cache para pular já processados)
         updated_articles = self.extractor.do_field_completion_of_missing_values_in_dic(
-            articles_list, completion_cache=completion_cache
+            articles_list,
+            completion_cache=completion_cache,
+            pdf_raw_by_id=pdf_raw_by_id,
         )
 
         # Log article metadata after field completion (convert to dict for logging)

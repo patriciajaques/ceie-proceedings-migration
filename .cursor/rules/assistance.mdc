@@ -1,0 +1,44 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+# Regras do Cursor - Análise e Modificações de Código
+
+## Processo Obrigatório para Todas as Modificações de Código
+
+### 1. ANALISAR PRIMEIRO (Sempre)
+- Examinar cuidadosamente todas as classes e dependências envolvidas
+- Identificar impacto no sistema e possíveis efeitos colaterais
+- Mapear relacionamentos entre componentes
+
+### 2. EXPLICAR ANTES DE CODIFICAR
+- Fornecer explicação clara das mudanças propostas
+- Justificar abordagem com raciocínio técnico
+- Destacar impactos no código existente
+- Sempre perguntar em caso de dúvida
+- **Quando múltiplas soluções existirem**: Apresentar todas as abordagens viáveis em alto nível, explicar prós/contras de cada uma, e perguntar "Você tem preferência por alguma dessas abordagens?"
+### 3. AGUARDAR APROVAÇÃO
+- **NUNCA gerar código sem confirmação explícita do usuário**
+- Perguntar: "Devo prosseguir com esta implementação?"
+
+### 4. IMPLEMENTAR APÓS APROVAÇÃO
+Seguir princípios de código limpo e engenharia de software:
+- **Código Limpo**: Nomes descritivos, responsabilidade única, sem duplicação
+- **Princípios SOLID**: Separação adequada de responsabilidades
+- **Melhores Práticas**: DRY, KISS, padrões de design apropriados
+
+## Exemplo de Fluxo:
+**Usuário**: "Adicionar validação de email à classe User"
+**LLM**:
+1. "Analisando classe User e dependências..."
+2. "Abordagem proposta: Método de validação privado..."
+3. "Devo prosseguir com a implementação?"
+4. [Aguardar confirmação antes de codificar]
+
+## Benefícios
+- Reduz riscos de bugs e efeitos colaterais
+- Melhora a qualidade do código
+- Facilita a manutenção
+- Promove boas práticas de desenvolvimento
+- Garante alinhamento com as expectativas do usuário
