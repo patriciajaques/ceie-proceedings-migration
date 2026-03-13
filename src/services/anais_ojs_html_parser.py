@@ -385,7 +385,7 @@ class OJSHTMLParser:
         author_tags = soup.find_all("td", string=lambda x: x and "Autor" in x)
         for tag in author_tags:
             # Navegar para a célula correta que contém os dados do autor
-            # Se a estrutura sempre incluir uma célula de descrição antes dos dados, ajuste conforme necessário
+            # Formato esperado: "Nome; Afiliação; País" ou "Nome; Afiliação; País; E-mail"
             info_td = tag.find_next("td")  # primeiro td após o título 'Autor'
             if info_td:
                 next_td = info_td.find_next_sibling("td")
@@ -396,8 +396,35 @@ class OJSHTMLParser:
                             "name": author_details[0].strip(),
                             "authorAffiliation": author_details[1].strip(),
                             "authorCountry": author_details[2].strip(),
+                            "authorEmail": (
+                                author_details[3].strip()
+                                if len(author_details) >= 4
+                                and author_details[3].strip()
+                                else ""
+                            ),
                         }
                         metadata["authors"].append(author)
+
+        # Fallback: procurar linhas "E-mail" / "Email" na tabela (comum em OJS)
+        # e preencher por ordem (primeiro e-mail -> primeiro autor, etc.)
+        if metadata["authors"] and not any(
+            a.get("authorEmail") for a in metadata["authors"]
+        ):
+            email_tags = soup.find_all(
+                "td",
+                string=lambda x: x
+                and ("E-mail" in (x.strip()) or "Email" in (x.strip())),
+            )
+            emails_from_rows = []
+            for et in email_tags:
+                next_td = et.find_next_sibling("td")
+                if next_td:
+                    val = next_td.text.strip()
+                    if val and "@" in val:
+                        emails_from_rows.append(val)
+            for i, author in enumerate(metadata["authors"]):
+                if i < len(emails_from_rows):
+                    author["authorEmail"] = emails_from_rows[i]
 
         # Encontrar Resumo e Abstract
         description_tag = soup.find(

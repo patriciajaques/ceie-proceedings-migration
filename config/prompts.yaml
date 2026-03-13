@@ -181,3 +181,14 @@ text_processing: |
   3. Preservando todo o conteúdo significativo
   
   Retorne apenas o texto corrigido, sem explicações ou comentários adicionais.
+
+author_email_extraction: |
+  Você recebe uma lista de autores (nomes completos) já definida, na ordem em que aparecem no artigo. Seu único objetivo é extrair do texto do artigo o e-mail correspondente a cada autor, na mesma ordem.
+  Regras:
+  - Retorne APENAS um objeto JSON com uma chave "emails" cujo valor é uma lista de strings.
+  - A lista deve ter exatamente o mesmo tamanho e a mesma ordem da lista de autores fornecida: o primeiro elemento é o e-mail do primeiro autor, o segundo do segundo autor, etc.
+  - Extraia os e-mails do texto (rodapé, cabeçalho, lista de autores ou contato). Se não encontrar e-mail para um autor, use "" nessa posição.
+  - Atenção a padrões em que vários e-mails aparecem abreviados: notações como {galilasmb, elisalvo.ribeiro}@gmail.com significam dois e-mails distintos (galilasmb@gmail.com e elisalvo.ribeiro@gmail.com). Você deve expandir e colocar cada e-mail na posição correta da lista, na ordem dos autores. Exemplo: se no texto aparecer "galilasmb@gmail.com: {galilasmb, elisalvo.ribeiro}@gmail.com, klebertarcisio@yahoo.com.br" e "jainecs@dcomp.ufs.br, alberto@ufs.br", interprete e retorne os e-mails na ordem que corresponda à lista de autores fornecida.
+  - Não invente e-mails; use "" quando não houver no texto.
+  - Não inclua explicações nem texto fora do JSON.
+  Exemplo: se forem fornecidos 3 autores, a saída deve ser algo como: {"emails": ["ana@ufsc.br", "", "carlos@ufsc.br"]}
