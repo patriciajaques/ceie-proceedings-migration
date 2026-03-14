@@ -78,34 +78,6 @@ article_extraction: |
   Este é apenas um exemplo. Assegure-se de adaptar o formato conforme a quantidade de autores e as informações disponíveis para cada um.
   7) Não retornar informações extras e explicações. Retornar apenas o dicionário JSON solicitado. 
 
-author_affiliation_correction: | 
-  Para o conteúdo JSON, que é uma lista de dicionários chamada "universidades:" onde cada entrada na lista contém dois pares chave-valor ("authorAffiliation" e "authorAffiliationEn"), corrija as entradas de acordo com as instruções abaixo para a lista JSON inteira:
-  1. Leia o conteúdo JSON, que é uma lista de dicionários. Cada dicionário contém, inicialmente, os campos "authorAffiliation" e "authorAffiliationEn".
-  2. Extraia o nome da universidade e sua sigla de ambos os campos "authorAffiliation" e "authorAffiliationEn". 
-    - Remova detalhes específicos como nomes de laboratórios, centros, programas de pós-graduação e endereços. Mantenha apenas o nome da universidade e sua sigla.
-    - Se a afiliação estiver presente apenas em "authorAffiliationEn" e não em "authorAffiliation", traduza o nome para o português.
-    - Inclua a sigla da universidade quando não estiver explicitamente mencionada.
-    - Se apenas a sigla estiver presente, complete com o nome da universidade em extenso tanto em português quanto em inglês.
-  3. Após a limpeza e padronização dos nomes das afiliações, crie uma lista única de nomes de universidades em português.
-  4. Traduza esses nomes para o inglês, incluindo a sigla na tradução.
-  5. Para cada nome de universidade, crie um dicionário contendo dois campos: "authorAffiliation" com o nome em português e "authorAffiliationEn" com a tradução para o inglês. Inclua também um campo "originalAuthorAffiliation" para preservar a versão original do "authorAffiliation".
-  6. Não gere código que faça o solicitado. Faça você mesmo o solicitado, retornando a nova lista com o que solicitado. 
-
-  Exemplo de saída esperada (formato JSON):
-
-  "universidades":[
-    {
-      "originalAuthorAffiliation": "Laboratório de Novas Tecnologias – Universidade Federal de Santa Catarina (UFSC)",
-      "authorAffiliation": "Universidade Federal de Santa Catarina (UFSC)",
-      "authorAffiliationEn": "Federal University of Santa Catarina (UFSC)"
-    },
-    {
-      "originalAuthorAffiliation": "Programa de Pós-Graduação em Informática (PPGI) – Universidade Tecnológica Federal do Paraná (UTFPR)",
-      "authorAffiliation": "Universidade Tecnológica Federal do Paraná (UTFPR)",
-      "authorAffiliationEn": "Federal Technological University of Paraná (UTFPR)"
-    }
-  ]
-
 cleaning: | 
   No texto dado, verifique e corrija qualquer erro de formatação das palavras,
   que possam ter ocorrido devido a problemas de reconhecimento de caracteres ASCII.
@@ -192,3 +164,57 @@ author_email_extraction: |
   - Não invente e-mails; use "" quando não houver no texto.
   - Não inclua explicações nem texto fora do JSON.
   Exemplo: se forem fornecidos 3 autores, a saída deve ser algo como: {"emails": ["ana@ufsc.br", "", "carlos@ufsc.br"]}
+
+author_affiliation_extraction: |
+  Você recebe:
+  - uma lista de autores (nomes completos) já definida, na ordem em que aparecem no artigo;
+  - e o texto do artigo APENAS até antes das seções "Resumo", "Resumen" ou "Abstract".
+
+  Seu objetivo é identificar, para cada autor, a INSTITUIÇÃO PRINCIPAL (por exemplo, universidade ou instituto principal) e devolver duas listas paralelas:
+  - "affiliations_pt": afiliação em português;
+  - "affiliations_en": afiliação em inglês.
+
+  Regras IMPORTANTES:
+  - A lista "affiliations_pt" deve ter exatamente o mesmo tamanho e a mesma ordem da lista de autores fornecida.
+  - A lista "affiliations_en" deve ter exatamente o mesmo tamanho e a mesma ordem da lista de autores fornecida.
+  - Quando não encontrar a afiliação de um autor no texto, use "" na posição correspondente em ambas as listas.
+  - Não adicione nem remova autores; apenas alinhe as afiliações à lista já fornecida.
+
+  Sobre o formato da afiliação:
+  - Considere apenas a INSTITUIÇÃO PRINCIPAL do autor (ex.: universidade ou instituto principal).
+  - NÃO inclua nomes de departamentos, faculdades, programas de pós-graduação, cursos, laboratórios ou grupos de pesquisa.
+    Exemplos de trechos que devem ser removidos:
+      - "Departamento de Computação"
+      - "Instituto de Informática"
+      - "Centro de Ciências"
+      - "Programa de Pós-Graduação em Computação"
+  - Em português ("affiliations_pt"), o formato deve ser:
+      "Nome da universidade em português (SIGLA)"
+    Exemplos:
+      - "Universidade Federal de Sergipe (UFS)"
+      - "Universidade Federal do Ceará (UFC)"
+  - Em inglês ("affiliations_en"), o formato deve ser:
+      "Nome da universidade em inglês (MESMA SIGLA)"
+    Exemplos:
+      - "Federal University of Sergipe (UFS)"
+      - "Federal University of Ceará (UFC)"
+  - Quando um autor tiver MAIS DE UMA instituição principal, una todas as instituições desse autor em uma única string,
+    separando-as com o caractere pipe "|".
+    Exemplos:
+      - Em português: "Universidade X (UX) | Universidade Y (UY)"
+      - Em inglês: "University X (UX) | University Y (UY)"
+
+  Tradução e normalização:
+  - Se a afiliação aparecer apenas em português, traduza para inglês seguindo o formato acima.
+  - Se a afiliação aparecer apenas em inglês, gere a versão em português equivalente.
+  - Inclua sempre a sigla da instituição entre parênteses, quando existir.
+  - Quando apenas a sigla aparecer, complete com o nome por extenso tanto em português quanto em inglês.
+  - Normalize os nomes das instituições, evitando variações desnecessárias (por exemplo, use sempre a mesma forma para a mesma universidade).
+
+  Saída:
+  - Retorne APENAS um objeto JSON com a seguinte estrutura:
+    {
+      "affiliations_pt": ["...", "..."],
+      "affiliations_en": ["...", "..."]
+    }
+  - Não inclua explicações, comentários ou qualquer texto fora desse objeto JSON.

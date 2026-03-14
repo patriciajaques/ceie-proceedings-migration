@@ -31,7 +31,6 @@ def main():
         "article_ai_client": "article_extraction",
         "references_ai_client": "references_extraction",
         "field_completion_ai_client": "field_completion",
-        "affiliation_correction_client": "author_affiliation_correction",
         "text_processing_client": "text_processing",
     }
     ai_clients = {

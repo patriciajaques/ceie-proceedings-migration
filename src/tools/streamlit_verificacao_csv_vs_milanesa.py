@@ -1,7 +1,7 @@
-import base64
 import os
 from pathlib import Path
 
+import fitz
 import pandas as pd
 import streamlit as st
 
@@ -83,28 +83,39 @@ def _affiliations_from_csv(authors_df: pd.DataFrame, seq: str) -> list[str]:
     return affiliations
 
 
-def _display_pdf(pdf_path: Path, height: int = 800, top_crop: int = 0) -> None:
+def _display_pdf(
+    pdf_path: Path,
+    height: int = 800,
+    top_crop: int = 0,
+) -> None:
+    """Display only the first page of the PDF, optionally hiding the top (header)."""
     if not pdf_path.exists():
         st.warning("PDF não encontrado para este artigo.")
         return
 
-    with open(pdf_path, "rb") as f:
-        base64_pdf = base64.b64encode(f.read()).decode("utf-8")
+    try:
+        doc = fitz.open(pdf_path)
+        if doc.page_count == 0:
+            st.warning("PDF sem páginas.")
+            doc.close()
+            return
+        page = doc[0]
+        mat = fitz.Matrix(2.0, 2.0)
+        # Clip top of page to hide header (top_crop in pixels at 2x ≈ half in points)
+        clip = None
+        if top_crop > 0:
+            # PDF units: 72 points per inch; clip from top_crop (pixel hint) to points
+            top_pt = top_crop * 72 / 96  # ~96 DPI reference
+            r = page.rect
+            clip = fitz.Rect(0, top_pt, r.width, r.height)
+        pix = page.get_pixmap(matrix=mat, alpha=False, clip=clip)
+        png_bytes = pix.tobytes("png")
+        doc.close()
+    except Exception as e:
+        st.warning(f"Erro ao abrir PDF: {e}")
+        return
 
-    # Wrapper para "cortar" a parte superior do PDF (cabecalho) visualmente
-    effective_height = height + top_crop
-    pdf_html = f"""
-        <div style="width:100%; height:{height}px; overflow:hidden;">
-            <iframe
-                src="data:application/pdf;base64,{base64_pdf}"
-                width="100%"
-                height="{effective_height}px"
-                style="margin-top:-{top_crop}px; border:none;"
-                type="application/pdf"
-            ></iframe>
-        </div>
-    """
-    st.markdown(pdf_html, unsafe_allow_html=True)
+    st.image(png_bytes, use_container_width=True)
 
 
 def _build_article_list(

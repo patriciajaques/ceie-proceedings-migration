@@ -59,7 +59,6 @@ The service layer contains the core business logic:
 - **PDFDownloader**: Downloads PDF files from academic websites
 - **PDFProcessor**: Extracts text from PDF files
 - **OJSHTMLParser**: Parses HTML pages from the Open Journal System (OJS)
-- **AuthorsAffiliationCorrector**: Corrects and standardizes author affiliations
 
 ### AI Adapters
 
@@ -189,27 +188,6 @@ def clean_text(self, text):
         return self.process_with_ai(text)
 
     return self.basic_cleaning(text)
-```
-
-### Affiliation Correction
-
-The system uses AI to correct and standardize author affiliations:
-
-```python
-def correct_affiliation_columns_from_authors_csv(self):
-    authors_df = self.load_authors_data()
-    authors_aff_df = authors_df[["authorAffiliation", "authorAffiliationEn"]]
-    chunks = self.split_into_chunks(authors_aff_df)
-    
-    dict_list = []
-    for chunk in chunks:
-        result = self.process_affiliation_chunk(chunk)
-        dict_list.extend(result)
-    
-    authors_df = self.merge_and_update_dataframe(authors_df, dict_list)
-    self.save_corrected_data(authors_df)
-    
-    return self.convert_to_domain_objects(authors_df)
 ```
 
 ## Dependencies

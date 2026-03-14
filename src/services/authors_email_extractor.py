@@ -27,11 +27,11 @@ class AuthorsEmailExtractor:
         self.config_loader = config_loader
 
         output_dir = config_loader.get_config_value("output_dir")
-        year = str(config_loader.get_config_value("year"))
+        self.year = str(config_loader.get_config_value("year"))
 
-        self.csv_folder = os.path.join(output_dir, year, "csv")
-        self.logs_folder = os.path.join(output_dir, year, "logs")
-        self.pdf_folder = os.path.join(output_dir, year, "pdfs")
+        self.csv_folder = os.path.join(output_dir, self.year, "csv")
+        self.logs_folder = os.path.join(output_dir, self.year, "logs")
+        self.pdf_folder = os.path.join(output_dir, self.year, "pdfs")
 
     def _get_authors_csv_path(self) -> str:
         return os.path.join(self.csv_folder, "Autores.csv")
@@ -301,6 +301,12 @@ class AuthorsEmailExtractor:
         return result
 
     @staticmethod
+    def _cell_str(val: Any) -> str:
+        """Return non-empty string; treat NaN and 'nan' as empty."""
+        s = str(val).strip() if val is not None and val != "" else ""
+        return "" if s.lower() == "nan" else s
+
+    @staticmethod
     def _parse_llm_emails_json(response: str) -> list[str]:
         """Parse LLM response to extract emails list (same order as authors). Returns [] on failure."""
         if not response or not response.strip():
@@ -329,6 +335,59 @@ class AuthorsEmailExtractor:
                     except (json.JSONDecodeError, TypeError):
                         return []
         return []
+
+    @staticmethod
+    def _parse_llm_affiliations_json(
+        response: str,
+    ) -> tuple[list[str], list[str]]:
+        """
+        Parse LLM response to extract affiliations lists in pt and en.
+
+        Expected JSON structure:
+        {
+            "affiliations_pt": [...],
+            "affiliations_en": [...]
+        }
+
+        Returns:
+            Tuple (affiliations_pt, affiliations_en). Each element is a list of
+            strings; empty lists are returned on failure.
+        """
+        if not response or not response.strip():
+            return [], []
+        text = response.strip()
+        if "```" in text:
+            for part in re.split(r"```\w*\s*", text):
+                part = part.strip()
+                if part.startswith("{"):
+                    text = part
+                    break
+        start = text.find("{")
+        if start == -1:
+            return [], []
+        depth = 0
+        for i, c in enumerate(text[start:], start=start):
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        data = json.loads(text[start : i + 1])
+                        pt_raw = data.get("affiliations_pt") or []
+                        en_raw = data.get("affiliations_en") or []
+                        pt_list = [
+                            str(a).strip() if a is not None else ""
+                            for a in pt_raw
+                        ]
+                        en_list = [
+                            str(a).strip() if a is not None else ""
+                            for a in en_raw
+                        ]
+                        return pt_list, en_list
+                    except (json.JSONDecodeError, TypeError):
+                        return [], []
+        return [], []
 
     def fill_missing_emails_from_llm(
         self,
@@ -376,11 +435,6 @@ class AuthorsEmailExtractor:
         pages_config = max_pages_per_pdf if max_pages_per_pdf > 0 else 5
         article_num_col = authors_df["article"]
 
-        def _cell_str(val: Any) -> str:
-            """Return non-empty string; treat NaN and 'nan' as empty."""
-            s = str(val).strip() if val is not None and val != "" else ""
-            return "" if s.lower() == "nan" else s
-
         for idx, id_jems in enumerate(ordered_id_jems):
             if max_articles is not None and idx >= max_articles:
                 break
@@ -395,9 +449,9 @@ class AuthorsEmailExtractor:
             author_keys: list[Tuple[str, str]] = []
             author_names_display: list[str] = []
             for _, row in article_rows.iterrows():
-                first = _cell_str(row.get("authorFirstName"))
-                middle = _cell_str(row.get("authorMiddleName"))
-                last = _cell_str(row.get("authorLastName"))
+                first = self._cell_str(row.get("authorFirstName"))
+                middle = self._cell_str(row.get("authorMiddleName"))
+                last = self._cell_str(row.get("authorLastName"))
                 normalized = self._normalize_name(first, middle, last)
                 if normalized:
                     author_keys.append((id_jems, normalized))
@@ -469,7 +523,7 @@ class AuthorsEmailExtractor:
 
         def fill_email(row: pd.Series) -> str:
             nonlocal filled_count
-            current = _cell_str(row.get("authorEmail"))
+            current = self._cell_str(row.get("authorEmail"))
             if current:
                 return current
             try:
@@ -503,9 +557,145 @@ class AuthorsEmailExtractor:
         )
         return authors_df
 
+    def fill_affiliations_from_llm(
+        self,
+        ai_client: Any,
+        pdf_processor: Any,
+        max_pages_per_pdf: int = 5,
+        start_df: pd.DataFrame | None = None,
+        max_articles: int | None = None,
+    ) -> pd.DataFrame:
+        """
+        Fill authorAffiliation and authorAffiliationEn using article PDFs via LLM.
+
+        For each article, extracts text from the first max_pages_per_pdf pages,
+        truncated at Resumo/Abstract, and asks the LLM to return two parallel
+        lists: affiliations_pt and affiliations_en, aligned with the ordered
+        list of authors of that article.
+
+        Existing values are overwritten when the LLM returns a non-empty value.
+        """
+        authors_df = start_df if start_df is not None else self.load_authors_df()
+        if authors_df.empty:
+            return authors_df
+
+        articles_metadata = self.load_articles_metadata()
+        ordered_id_jems = [
+            str(a.get("idJEMS") or a.get("id_jems") or "").strip()
+            for a in articles_metadata
+        ]
+        if not ordered_id_jems:
+            print(
+                "Nenhum metadado de artigos encontrado. "
+                "Abortando extração de afiliações por LLM."
+            )
+            return authors_df
+
+        total_articles = len(ordered_id_jems)
+        pages_config = max_pages_per_pdf if max_pages_per_pdf > 0 else 5
+        article_num_col = authors_df["article"]
+
+        for idx, id_jems in enumerate(ordered_id_jems):
+            if max_articles is not None and idx >= max_articles:
+                break
+            if not id_jems:
+                continue
+            article_num = idx + 1
+            mask = article_num_col == article_num
+            article_rows = authors_df.loc[mask].sort_values("order")
+            if article_rows.empty:
+                continue
+
+            author_display_names: list[str] = []
+            row_indices: list[int] = []
+            for row_index, row in article_rows.iterrows():
+                first = self._cell_str(row.get("authorFirstName"))
+                middle = self._cell_str(row.get("authorMiddleName"))
+                last = self._cell_str(row.get("authorLastName"))
+                name_display = " ".join(p for p in [first, middle, last] if p)
+                if not name_display:
+                    continue
+                author_display_names.append(name_display)
+                row_indices.append(row_index)
+
+            if not author_display_names:
+                continue
+
+            pdf_path = os.path.join(self.pdf_folder, f"{id_jems}.pdf")
+            if not os.path.isfile(pdf_path):
+                continue
+
+            try:
+                text_pages, _ = pdf_processor.extract_text_from_each_page(pdf_path)
+                text_pages = text_pages[:pages_config] if text_pages else []
+                combined_text = "\n\n".join(p if p else "" for p in text_pages)
+                if not combined_text.strip():
+                    continue
+                combined_text = self._truncate_at_resumo_or_abstract(combined_text)
+                if not combined_text.strip():
+                    continue
+            except Exception as e:
+                print(f"  Erro ao extrair texto do PDF {id_jems}: {e}")
+                continue
+
+            authors_block = "Autores (na ordem abaixo):\n" + "\n".join(
+                f"{i+1}. {name}" for i, name in enumerate(author_display_names)
+            )
+            text_preview = (
+                combined_text[:12000]
+                if len(combined_text) > 12000
+                else combined_text
+            )
+            instruction = (
+                f"{authors_block}\n\n"
+                "--- Texto do artigo (até Resumo/Abstract) ---\n\n"
+                f"{text_preview}\n\n"
+                "--- Fim do texto ---\n\n"
+                "Com base nas instruções fornecidas na mensagem de sistema e NO TEXTO "
+                "ACIMA, extraia as afiliações institucionais para cada autor na ordem "
+                "da lista e retorne apenas o objeto JSON solicitado.\n"
+            )
+
+            print(
+                f"  [LLM] Extraindo afiliações do artigo "
+                f"{idx + 1}/{total_articles} (idJEMS={id_jems})..."
+            )
+            try:
+                response = ai_client.create_completion(instruction, is_json=True)
+            except Exception as e:
+                print(f"  Erro na chamada à IA para {id_jems}: {e}")
+                continue
+
+            affiliations_pt, affiliations_en = self._parse_llm_affiliations_json(
+                response or ""
+            )
+
+            n_authors = len(author_display_names)
+            if len(affiliations_pt) < n_authors:
+                affiliations_pt = affiliations_pt + [""] * (n_authors - len(affiliations_pt))
+            if len(affiliations_en) < n_authors:
+                affiliations_en = affiliations_en + [""] * (n_authors - len(affiliations_en))
+
+            affiliations_pt = affiliations_pt[:n_authors]
+            affiliations_en = affiliations_en[:n_authors]
+
+            for pos, row_index in enumerate(row_indices):
+                new_pt = self._cell_str(
+                    affiliations_pt[pos] if pos < len(affiliations_pt) else ""
+                )
+                new_en = self._cell_str(
+                    affiliations_en[pos] if pos < len(affiliations_en) else ""
+                )
+                if new_pt:
+                    authors_df.at[row_index, "authorAffiliation"] = new_pt
+                if new_en:
+                    authors_df.at[row_index, "authorAffiliationEn"] = new_en
+
+        return authors_df
+
     def save_authors_emails_2018(self, authors_df: pd.DataFrame) -> None:
         """
-        Save updated authors DataFrame to Autores_emails_2018.csv.
+        Save updated authors DataFrame to Autores_emails_{year}.csv.
 
         Args:
             authors_df: DataFrame with updated authorEmail values.
@@ -534,7 +724,47 @@ class AuthorsEmailExtractor:
         # Evitar gravar NaN no CSV (ficaria "nan" no arquivo)
         final_df = final_df.fillna("")
 
-        output_path = os.path.join(self.csv_folder, "Autores_emails_2018.csv")
+        filename = f"Autores_emails_{self.year}.csv"
+        output_path = os.path.join(self.csv_folder, filename)
+        final_df.to_csv(output_path, sep=";", index=False)
+
+        print(f"Arquivo salvo em: {output_path}")
+
+    def save_authors_affiliations_2018(self, authors_df: pd.DataFrame) -> None:
+        """
+        Save updated authors DataFrame with affiliations to Autores_afiliacoes_{year}.csv.
+
+        Args:
+            authors_df: DataFrame with updated affiliation values.
+        """
+        if authors_df.empty:
+            print("DataFrame de autores vazio. Nada foi salvo.")
+            return
+
+        desired_order = [
+            "article",
+            "authorFirstName",
+            "authorMiddleName",
+            "authorLastName",
+            "authorAffiliation",
+            "authorAffiliationEn",
+            "authorCountry",
+            "authorEmail",
+            "orcid",
+            "order",
+        ]
+
+        columns = [c for c in desired_order if c in authors_df.columns]
+        other_columns = [c for c in authors_df.columns if c not in columns]
+        final_df = (
+            authors_df[columns + other_columns].copy()
+            if other_columns
+            else authors_df[columns].copy()
+        )
+        final_df = final_df.fillna("")
+
+        filename = f"Autores_afiliacoes_{self.year}.csv"
+        output_path = os.path.join(self.csv_folder, filename)
         final_df.to_csv(output_path, sep=";", index=False)
 
         print(f"Arquivo salvo em: {output_path}")
