@@ -73,16 +73,6 @@ def _authors_from_csv(authors_df: pd.DataFrame, seq: str) -> list[dict]:
     return authors
 
 
-def _affiliations_from_csv(authors_df: pd.DataFrame, seq: str) -> list[str]:
-    rows = authors_df[authors_df["article"].astype(str) == str(seq)]
-    affiliations: list[str] = []
-    for _, r in rows.sort_values("order").iterrows():
-        aff = str(r.get("authorAffiliation", "") or "").strip()
-        if aff and aff not in affiliations:
-            affiliations.append(aff)
-    return affiliations
-
-
 def _display_pdf(
     pdf_path: Path,
     height: int = 800,

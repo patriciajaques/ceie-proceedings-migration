@@ -1,5 +1,5 @@
 # src/domain/article.py
-from typing import List, Optional, Dict, Any
+from typing import Dict, Any
 from src.domain.base_model import BaseModel
 
 
@@ -153,29 +153,3 @@ class Article(BaseModel):
         result["references"] = [reference.to_dict() for reference in self.references]
 
         return result
-
-    def add_author(self, author) -> None:
-        """
-        Add an author to the article.
-
-        Args:
-            author: Author object or dictionary to add
-        """
-        from src.domain.author import Author
-
-        if isinstance(author, dict):
-            author = Author.from_dict(author)
-        self.authors.append(author)
-
-    def add_reference(self, reference) -> None:
-        """
-        Add a reference to the article.
-
-        Args:
-            reference: Reference object or dictionary to add
-        """
-        from src.domain.reference import Reference
-
-        if isinstance(reference, dict):
-            reference = Reference.from_dict(reference)
-        self.references.append(reference)

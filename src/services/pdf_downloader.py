@@ -83,29 +83,38 @@ class PDFDownloader:
         pdf_urls = [link.get("href").replace("view", "download") for link in pdf_links]
         return pdf_urls
 
-    def donwload_pdf_files_from_url(self, num_urls_to_process=-1):
+    def donwload_pdf_files_from_url(self, num_urls_to_process=-1, start_index=0):
         """
-        Downloads and saves all the PDF files from the base URL.
+        Downloads and saves PDF files from the base URL (issue page order).
         Skips files that already exist.
 
         Args:
-            num_urls_to_process (int, optional): The number of PDF files to download and save.
-                                                If set to -1, all the PDF files will be processed.
+            num_urls_to_process: Number of PDFs to process after start_index.
+                If -1, processes from start_index to the end of the list.
+            start_index: Skip the first N PDF links (batching / article_offset).
 
         """
         pdf_urls = self.get_pdf_urls()
         downloaded_count = 0
         skipped_count = 0
 
-        # Determine total number of files to process
-        total_files = (
-            num_urls_to_process if num_urls_to_process != -1 else len(pdf_urls)
-        )
+        if start_index < 0:
+            start_index = 0
+        if start_index >= len(pdf_urls):
+            print(
+                f"\nResumo: 0 arquivo(s) (start_index={start_index} fora da lista de "
+                f"{len(pdf_urls)} PDFs)."
+            )
+            return
 
-        for i, url in enumerate(pdf_urls):
-            if num_urls_to_process != -1 and i >= num_urls_to_process:
-                break
+        end_exclusive = None
+        if num_urls_to_process != -1:
+            end_exclusive = start_index + num_urls_to_process
 
+        window = pdf_urls[start_index:end_exclusive]
+        total_files = len(window)
+
+        for j, url in enumerate(window):
             # Check if file already exists before attempting download
             filename = url.split("/")[-1]
             if not filename.endswith(".pdf"):
@@ -114,16 +123,19 @@ class PDFDownloader:
             file_exists = os.path.exists(filepath)
 
             if file_exists:
-                print(f"[{i+1}/{total_files}] Arquivo já existe, pulando: {filename}")
+                print(
+                    f"[{j + 1}/{total_files}] Arquivo já existe, pulando: {filename}"
+                )
                 skipped_count += 1
             else:
-                print(f"[{i+1}/{total_files}] Baixando PDF de {url}")
+                print(f"[{j + 1}/{total_files}] Baixando PDF de {url}")
                 pdf_path = self.download_and_save_pdf(url)
                 print(f"Arquivo criado: {pdf_path}")
                 downloaded_count += 1
 
         print(
-            f"\nResumo: {downloaded_count} arquivo(s) baixado(s), {skipped_count} arquivo(s) já existente(s)"
+            f"\nResumo: {downloaded_count} arquivo(s) baixado(s), "
+            f"{skipped_count} arquivo(s) já existente(s)"
         )
 
 

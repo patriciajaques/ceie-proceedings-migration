@@ -356,6 +356,9 @@ class TextProcessor:
             instruction=instruction,
             response=corrected_text or "",
             system_message=getattr(self.ai_client, "system_message", None),
+            response_metadata=getattr(
+                self.ai_client, "last_response_metadata", None
+            ),
         )
         if not corrected_text:
             print(

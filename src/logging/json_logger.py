@@ -2,7 +2,7 @@
 import json
 import os
 import datetime
-from typing import Optional
+from typing import Any, Optional
 from src.config.config_loader import ConfigLoader
 
 
@@ -15,7 +15,6 @@ class JsonLogger:
     """
 
     # Class-level configuration
-    _config_loader = None
     _base_dir = None
 
     @classmethod
@@ -26,7 +25,6 @@ class JsonLogger:
         Args:
             config_loader (ConfigLoader): Configuration loader instance.
         """
-        cls._config_loader = config_loader
         output_dir = config_loader.get_config_value("output_dir")
         year = config_loader.get_config_value("year")
         cls._base_dir = os.path.join(output_dir, f"{year}", "logs")
@@ -40,8 +38,8 @@ class JsonLogger:
             str: Base directory path.
         """
         if cls._base_dir is None:
-            # Default directory if not initialized
-            return "outputs/logs"
+            # Default directory if not initialized (matches config output_dir)
+            return "output/logs"
         return cls._base_dir
 
     @classmethod
@@ -108,6 +106,7 @@ class JsonLogger:
         instruction: str,
         response: str,
         system_message: Optional[str] = None,
+        response_metadata: Optional[dict[str, Any]] = None,
     ) -> None:
         """
         Registra uma chamada à IA em ai_calls.log.jsonl com etapa explícita.
@@ -120,6 +119,8 @@ class JsonLogger:
             instruction: Conteúdo enviado ao modelo (user message).
             response: Resposta bruta do modelo.
             system_message: Conteúdo do system prompt (opcional).
+            response_metadata: Metadados da resposta (ex.: finish_reason) quando
+                a resposta vem vazia; usado para depuração.
         """
         try:
             target_dir = cls.get_base_dir()
@@ -132,6 +133,8 @@ class JsonLogger:
                 "instruction": instruction,
                 "response": response,
             }
+            if response_metadata:
+                log_entry["response_metadata"] = response_metadata
             with open(log_path, "a", encoding="utf-8") as f:
                 json.dump(log_entry, f, ensure_ascii=False)
                 f.write("\n")

@@ -1,5 +1,4 @@
 import json
-import os
 import unicodedata
 from typing import Dict, List, Optional
 from src.utils.text_processor import TextProcessor
@@ -21,7 +20,6 @@ class ArticleExtractor:
         references_ai_client: AIClientInterface,
         field_completion_ai_client: AIClientInterface,
         text_processor: Optional[TextProcessor] = None,
-        extraction_cache_path: Optional[str] = None,
     ):
         """Initializes the article extractor.
 
@@ -31,140 +29,11 @@ class ArticleExtractor:
             field_completion_ai_client (AIClientInterface): AI client for completing missing fields.
             text_processor (TextProcessor, optional): Text processor for cleaning text.
                 If not provided, a new one will be created.
-            extraction_cache_path (str, optional): Path to JSON file for incremental extraction cache.
-                If provided, articles already extracted will be loaded from cache and skipped.
         """
         self.article_ai_client = article_ai_client
         self.references_ai_client = references_ai_client
         self.field_completion_ai_client = field_completion_ai_client
         self.text_processor = text_processor or TextProcessor()
-        self.extraction_cache_path = extraction_cache_path
-
-    def _load_extraction_cache(self) -> Dict[str, dict]:
-        """Carrega o cache de extração do disco, se existir."""
-        if not self.extraction_cache_path or not os.path.exists(self.extraction_cache_path):
-            return {}
-        try:
-            with open(self.extraction_cache_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and "data" in data:
-                return data["data"]
-            if isinstance(data, dict):
-                return data
-            return {}
-        except (json.JSONDecodeError, IOError):
-            return {}
-
-    def _save_extraction_cache(self, cache: Dict[str, dict]) -> None:
-        """Persiste o cache de extração no disco."""
-        if not self.extraction_cache_path:
-            return
-        os.makedirs(os.path.dirname(self.extraction_cache_path), exist_ok=True)
-        with open(self.extraction_cache_path, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False, indent=2)
-
-    def extract_articles_data_from_PDF_text(
-        self, all_files_text: List[Dict]
-    ) -> List[Article]:
-        """Extracts article data from PDF text.
-
-        Not used by the main Migrator flow (site-first migration builds article
-        metadata from the OJS website and uses PDF text only for references
-        and page counts). Kept for tooling or manual experiments.
-
-        Usa cache incremental: artigos já extraídos são carregados do disco e pulados.
-        O cache é salvo após cada artigo para permitir retomada em caso de interrupção.
-        O cache não é reduzido quando se roda com menos arquivos: mantém todos os artigos
-        já processados para recuperação e retomada.
-
-        Args:
-            all_files_text (list): List of dictionaries containing text extracted from PDFs.
-
-        Returns:
-            list: List of Article objects with article metadata.
-        """
-        articles_list = []
-        cache = self._load_extraction_cache() if self.extraction_cache_path else {}
-
-        for count, one_article_text in enumerate(all_files_text, start=1):
-            base_filename = one_article_text["base_filename"]
-            if base_filename in cache:
-                articles_list.append(Article.from_dict(cache[base_filename]))
-                print(f"\n\nProcessed article number {count} (from cache)\n")
-                continue
-
-            article = self.extract_article_data(one_article_text)
-            articles_list.append(article)
-            cache[base_filename] = article.to_dict()
-            if self.extraction_cache_path:
-                self._save_extraction_cache(cache)
-            print(f"\n\nProcessed article number {count}\n")
-
-        return articles_list
-
-    def extract_article_data(self, one_article_text: Dict) -> Article:
-        """Extracts data from a single article.
-
-        Args:
-            one_article_text (dict): Dictionary containing text extracted from a PDF.
-
-        Returns:
-            Article: Article object with article metadata.
-        """
-        first_pages = self.extract_pages(one_article_text, page_location="first")
-        first_pages = self.text_processor.clean_text(first_pages)
-
-        # Prefer section "Referências"/"References" (from end backward); else last 3 pages
-        section_pages_raw = self.get_reference_pages_text(
-            one_article_text, strategy="section"
-        )
-        if section_pages_raw:
-            last_pages = section_pages_raw
-        else:
-            last_pages = self.get_reference_pages_text(
-                one_article_text, strategy="last"
-            )
-        last_pages = self.text_processor.clean_text(last_pages)
-
-        # Check if we have section information
-        section_abbrev = one_article_text.get("sectionAbbrev", None)
-
-        article_dict = self.extract_metadata_with_ai(
-            first_pages, last_pages, section_abbrev
-        )
-
-        # Fallback: if we used "last" and got few refs, try section (e.g. encoding)
-        if section_abbrev != "EDT" and not section_pages_raw:
-            refs = article_dict.get("references") or []
-            if len(refs) < 2:
-                section_pages = self.get_reference_pages_text(
-                    one_article_text, strategy="section"
-                )
-                if section_pages:
-                    section_pages = self.text_processor.clean_text(
-                        section_pages
-                    )
-                    refs_fallback = (
-                        self.extract_references_metadata_with_ai(section_pages)
-                    )
-                    refs_fallback_list = refs_fallback.get(
-                        "references", []
-                    )
-                    if len(refs_fallback_list) > len(refs):
-                        article_dict["references"] = refs_fallback_list
-
-        # Update with additional information
-        article_dict["num_pages"] = one_article_text["numPages"]
-        article_dict["id_jems"] = one_article_text["base_filename"]
-
-        # Language:
-        # - Preferir o valor retornado pelo modelo em article_dict["language"]
-        # - Se o modelo não informar a língua, assumir "pt" como padrão
-        if not article_dict.get("language"):
-            article_dict["language"] = "pt"
-
-        # Convert to Article object
-        return Article.from_dict(article_dict)
 
     # Headings used to detect the references section when last pages are appendices
     REFERENCE_SECTION_HEADINGS = (
@@ -280,7 +149,9 @@ class ArticleExtractor:
         Returns:
             str: Text from the specified pages.
         """
-        text_pages = one_article_text["text_pages"]
+        text_pages = one_article_text.get("text_pages") or []
+        if not text_pages:
+            return ""
 
         if page_location == "first":
             # Strategy for initial pages
@@ -322,48 +193,6 @@ class ArticleExtractor:
 
         # Default behavior for invalid argument
         raise ValueError(f"Invalid page location: {page_location}")
-
-    def extract_metadata_with_ai(
-        self, first_pages: str, last_pages: str, section_abbrev: Optional[str] = None
-    ) -> Dict:
-        """Extracts metadata using AI.
-
-        Args:
-            first_pages (str): Text from the first pages of the article.
-            last_pages (str): Text from the last pages of the article.
-            section_abbrev (str, optional): Section abbreviation. Defaults to None.
-
-        Returns:
-            dict: Dictionary with article metadata and references.
-        """
-        article_dict = self.extract_article_metadata_with_ai(first_pages)
-        article_dict["firstPages"] = first_pages
-        article_dict["lastPages"] = last_pages
-
-        # Adjust sectionAbbrev field if provided
-        if section_abbrev:
-            article_dict["sectionAbbrev"] = section_abbrev
-
-        # Only extract references if NOT an editorial
-        if section_abbrev != "EDT":
-            references_dict = self.extract_references_metadata_with_ai(last_pages)
-            article_dict["references"] = references_dict.get("references", [])
-        else:
-            # For editorials, just add an empty references list
-            article_dict["references"] = []
-
-        return article_dict
-
-    def extract_article_metadata_with_ai(self, first_pages: str) -> Dict:
-        """Extracts article metadata using AI.
-
-        Args:
-            first_pages (str): Text from the first pages of the article.
-
-        Returns:
-            dict: Dictionary with article metadata.
-        """
-        return self.extract_info_with_ai(self.article_ai_client, first_pages)
 
     def extract_references_metadata_with_ai(self, last_pages: str) -> Dict:
         """Extracts references using AI.
@@ -553,11 +382,16 @@ class ArticleExtractor:
         """
         step = getattr(ai_client, "prompt_key", "unknown")
         system_message = getattr(ai_client, "system_message", None)
+        response_metadata = None
+        if hasattr(ai_client, "last_response_metadata"):
+            response_metadata = getattr(ai_client, "last_response_metadata", None)
+
         JsonLogger.log_ai_call(
             step=step,
             instruction=instruction,
             response=response,
             system_message=system_message,
+            response_metadata=response_metadata,
         )
 
     def _extract_json_from_text(self, text: str) -> str:
@@ -568,7 +402,7 @@ class ArticleExtractor:
         # 1) Se existir bloco ```json ... ```, usar só o conteúdo entre as marcas
         if "```" in text:
             parts = text.split("```")
-            for j, part in enumerate(parts):
+            for part in parts:
                 if part.strip().lower().startswith("json"):
                     part = part.split("\n", 1)[-1] if "\n" in part else part[4:]
                     text = part.strip()

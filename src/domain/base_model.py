@@ -1,5 +1,5 @@
 # src/domain/base_model.py
-from typing import Dict, Any, ClassVar, Type, List, Optional
+from typing import Dict, Any, ClassVar, List, Optional
 
 
 class BaseModel:

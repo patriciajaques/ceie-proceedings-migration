@@ -7,8 +7,16 @@
     "engine_description": "GPT-5 Nano (usamos GPT 5 mini anteriormente, mas o modelo nano é mais rápido e barato e apresenta resultados de qualidade semelhante)",
     "max_tokens": 10000,
     "pages_to_process": 11,
-    "files_to_download": -1,
-    "files_to_download_description": "Use -1 to download all files"
+    "files_to_download": 10,
+    "files_to_download_description": "Use -1 for all articles (from article_offset onward).",
+    "article_offset": 0,
+    "article_offset_description": "Skip first N articles (issue order). Batch example: run1 files_to_download=10 offset=0; run2 files_to_download=10 offset=10. If you only raise files_to_download (10→20) without offset, the first 10 are processed again.",
+    "skip_fully_processed_articles": true,
+    "skip_fully_processed_articles_description": "If true, skip PDF/reference enrichment for articles already fully stored in articles_metadata_apos_do_field_completion.json (same rule as has_empty_fields).",
+    "langchain_tracing": false,
+    "langchain_tracing_description": "If false, sets LANGCHAIN_TRACING_V2=false so LangSmith does not log runs (large PDF inputs cause 422 ingest errors). Set true only for debugging with smaller prompts.",
+    "max_concurrency": 1,
+    "max_concurrency_description": "LangGraph thread pool for parallel Send workers (enrich + field completion). Use 1 for sequential (lower RAM). Omit key or use null for default parallel behaviour."
 }
 
 

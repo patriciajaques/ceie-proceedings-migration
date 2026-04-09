@@ -1,94 +1,68 @@
-# src/adapters/langchain_client.py
-from langchain_openai import ChatOpenAI
+from __future__ import annotations
+
+import json
+from typing import Any
+
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_openai import ChatOpenAI
 from langchain_core.language_models import BaseChatModel
-from src.adapters.base_ai_client import BaseAIClient
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from src.adapters.ai_client_interface import AIClientInterface
 from src.config.config_loader import ConfigLoader
-from src.config.credentials_manager_interface import CredentialsManagerInterface
 
 
-class LangChainClient(BaseAIClient):
+class LangChainClient(AIClientInterface):
     """
-    Client usando LangChain como abstração unificada para múltiplos provedores.
+    LangChain-backed client for multiple providers (OpenAI, Anthropic, etc.).
 
-    Suporta OpenAI, Anthropic, Google, Cohere e outros através do LangChain.
+    Loads system prompt from config, resolves credentials, and exposes
+    create_completion via AIClientInterface.
     """
 
-    def __init__(self, config_loader: ConfigLoader, prompt_key: str):
+    def __init__(self, config_loader: ConfigLoader, prompt_key: str) -> None:
         """
         Initialize the LangChain client.
 
         Args:
-            config_loader (ConfigLoader): Configuration loader instance.
-            prompt_key (str): Key for the prompt to be loaded.
+            config_loader: Configuration loader instance.
+            prompt_key: Key for the prompt to be loaded from YAML.
         """
+        self.prompt_key = prompt_key
         self.model_name = config_loader.get_config_value("engine")
         self.provider = self._detect_provider(self.model_name)
         self.max_tokens = config_loader.get_config_value("max_tokens", default=10000)
-        super().__init__(config_loader, prompt_key)
+        self.system_message = config_loader.load_prompt(prompt_key)
+        self.api_key = config_loader.get_api_key_for_provider(self.provider)
+        self.client = self._initialize_client()
+        # Set when the last completion returned empty content (for logging / debugging).
+        self.last_response_metadata: dict[str, Any] | None = None
 
     def _detect_provider(self, model_name: str) -> str:
         """
-        Detecta o provedor baseado no nome do modelo.
-
-        Args:
-            model_name (str): Nome do modelo (ex: 'gpt-4', 'claude-3-opus', 'gemini-pro')
-
-        Returns:
-            str: Nome do provedor ('openai', 'anthropic', 'google', etc.)
+        Detect provider from model name (e.g. gpt-*, claude-*, gemini-*).
         """
         model_lower = model_name.lower()
 
         if model_lower.startswith(("gpt-", "o1-", "o3-", "o4-")):
             return "openai"
-        elif model_lower.startswith(("claude-", "sonnet-")):
+        if model_lower.startswith(("claude-", "sonnet-")):
             return "anthropic"
-        elif model_lower.startswith(("gemini-", "palm-")):
+        if model_lower.startswith(("gemini-", "palm-")):
             return "google"
-        elif model_lower.startswith("command"):
+        if model_lower.startswith("command"):
             return "cohere"
-        else:
-            # Default para OpenAI se não conseguir detectar
-            return "openai"
+        return "openai"
 
-    def get_credentials_manager(self) -> CredentialsManagerInterface:
-        """Retorna o gerenciador de credenciais apropriado."""
-        if self.provider == "openai":
-            from src.config.openai_credentials_manager import (
-                OpenAICredentialsManager,
-            )
-
-            return OpenAICredentialsManager()
-        elif self.provider == "anthropic":
-            from src.config.anthropic_credentials_manager import (
-                AnthropicCredentialsManager,
-            )
-
-            return AnthropicCredentialsManager()
-        else:
-            # Fallback para OpenAI
-            from src.config.openai_credentials_manager import (
-                OpenAICredentialsManager,
-            )
-
-            return OpenAICredentialsManager()
-
-    def initialize_client(self) -> BaseChatModel:
-        """
-        Inicializa o cliente LangChain apropriado baseado no provedor.
-
-        Returns:
-            BaseChatModel: Cliente LangChain inicializado.
-        """
-        # Parâmetros comuns (max_tokens usa o default do modelo)
+    def _initialize_client(self) -> BaseChatModel:
+        """Initialize the LangChain chat model for the detected provider."""
         common_params: dict = {
             "temperature": 0,
+            "max_tokens": self.max_tokens,
         }
 
         client: BaseChatModel
         if self.provider == "openai":
-            # Verificar se o modelo suporta temperature customizada
             if self._is_temperature_restricted_model():
                 common_params.pop("temperature", None)
             client = ChatOpenAI(
@@ -131,79 +105,151 @@ class LangChainClient(BaseAIClient):
 
     def create_completion(self, user_message: str, is_json: bool = False) -> str:
         """
-        Cria uma completion usando LangChain.
+        Create a completion using LangChain.
 
         Args:
-            user_message (str): Mensagem do usuário.
-            is_json (bool, optional): Se True, solicita resposta em formato JSON.
-                Defaults to False.
+            user_message: User message.
+            is_json: If True, request JSON-shaped output where supported.
 
         Returns:
-            str: Resposta da API.
+            Model response text.
+
+        Raises:
+            Exception: Propagates API / LangChain failures (no silent empty return).
         """
         try:
+            self.last_response_metadata = None
+
             messages = [
                 SystemMessage(content=self.system_message),
                 HumanMessage(content=user_message),
             ]
 
-            # Para modelos que suportam JSON mode
             client_to_use = self.client
             if is_json and self.provider == "openai":
-                # Verificar se o modelo suporta json_object format
                 if self._supports_json_object():
-                    # No LangChain, response_format é passado via bind()
                     client_to_use = self.client.bind(
                         response_format={"type": "json_object"}
                     )
                 else:
-                    # Modelo não suporta json_object (ex.: gpt-5-mini); reforçar no prompt
                     user_message = (
                         f"{user_message}\n\nRetorne a resposta APENAS em formato JSON válido "
                         "(um único objeto), sem texto antes ou depois."
                     )
                     messages[1] = HumanMessage(content=user_message)
             elif is_json and self.provider == "anthropic":
-                # Anthropic não tem JSON mode direto, mas podemos instruir via prompt
-                user_message = f"{user_message}\n\nRetorne a resposta APENAS em formato JSON válido."
+                user_message = (
+                    f"{user_message}\n\nRetorne a resposta APENAS em formato JSON válido."
+                )
                 messages[1] = HumanMessage(content=user_message)
 
             response = client_to_use.invoke(messages)
-            
-            # Verificar se a resposta está vazia ou None
-            if not response or not response.content:
-                if hasattr(response, "response_metadata") and response.response_metadata:
-                    usage = response.response_metadata.get("usage")
-                    if usage and getattr(usage, "completion_tokens", None) is not None:
-                        print(
-                            f"\n\nWarning: Resposta vazia (completion_tokens: {usage.completion_tokens}). "
-                            "Pode ser limite de tokens do modelo."
-                        )
+
+            if not response or self._message_content_is_empty(response):
+                meta = self._serialize_aimessage_metadata(response)
+                self.last_response_metadata = meta
+                self._print_empty_response_debug(meta)
                 return ""
-            
+
             return response.content
 
         except Exception as e:
             error_msg = str(e)
-            # Detectar se o erro é relacionado a limite de tokens
             if "length limit" in error_msg.lower() or "token" in error_msg.lower():
                 print(f"\n\nError: Limite de tokens. Detalhes: {error_msg}")
             else:
                 print(f"\n\nError creating LangChain completion: {error_msg}")
 
-            # Neste projeto, falhas de conexão/execução com o modelo via LangChain
-            # devem abortar a execução em vez de retornar string vazia silenciosamente.
             raise
+
+    @staticmethod
+    def _message_content_is_empty(response: Any) -> bool:
+        """True if AIMessage has no usable text content."""
+        if response is None:
+            return True
+        content = getattr(response, "content", None)
+        if content is None:
+            return True
+        if isinstance(content, str):
+            return len(content.strip()) == 0
+        if isinstance(content, list):
+            return all(
+                not str(block.get("text", block) if isinstance(block, dict) else block).strip()
+                for block in content
+            )
+        return False
+
+    def _serialize_aimessage_metadata(self, response: Any) -> dict[str, Any]:
+        """
+        Build a JSON-safe dict for logging when the model returns empty content.
+
+        Includes response_metadata (token usage, finish_reason, model id) when present.
+        """
+        out: dict[str, Any] = {"empty_content": True, "prompt_key": self.prompt_key}
+        if response is None:
+            out["message"] = "AIMessage was None"
+            return out
+        mid = getattr(response, "id", None)
+        if mid:
+            out["message_id"] = mid
+        meta = getattr(response, "response_metadata", None) or {}
+        if isinstance(meta, dict):
+            out["response_metadata"] = self._json_safe(meta)
+        else:
+            out["response_metadata"] = str(meta)
+        return out
+
+    @staticmethod
+    def _json_safe(obj: Any) -> Any:
+        """Recursively convert objects to JSON-serializable structures."""
+        if obj is None or isinstance(obj, (bool, int, float, str)):
+            return obj
+        if isinstance(obj, dict):
+            return {str(k): LangChainClient._json_safe(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [LangChainClient._json_safe(x) for x in obj]
+        if hasattr(obj, "model_dump"):
+            try:
+                return LangChainClient._json_safe(obj.model_dump())
+            except Exception:
+                pass
+        if hasattr(obj, "__dict__"):
+            return LangChainClient._json_safe(
+                {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+            )
+        return str(obj)
+
+    def _print_empty_response_debug(self, meta: dict[str, Any]) -> None:
+        """User-facing hint in Portuguese; full metadata goes to ai_calls.log.jsonl."""
+        rm = meta.get("response_metadata")
+        finish = None
+        usage = None
+        if isinstance(rm, dict):
+            finish = rm.get("finish_reason")
+            usage = rm.get("token_usage") or rm.get("usage")
+        summary = {
+            "etapa": self.prompt_key,
+            "modelo": self.model_name,
+            "finish_reason": finish,
+            "token_usage": usage,
+        }
+        print(
+            "\n\n[LLM] Resposta vazia. "
+            f"Resumo: {json.dumps(summary, ensure_ascii=False)}",
+            flush=True,
+        )
+        if isinstance(usage, dict):
+            ct = usage.get("completion_tokens")
+            if ct is not None and int(ct) == 0:
+                print(
+                    "[LLM] completion_tokens=0 — possível limite de saída, "
+                    "filtro de conteúdo ou sobrecarga da API.",
+                    flush=True,
+                )
 
     def _is_temperature_restricted_model(self) -> bool:
         """
-        Check if the model only supports default temperature value.
-
-        Some newer models like gpt-5-mini-* only support the default temperature (1)
-        and will error if temperature=0 is explicitly set.
-
-        Returns:
-            bool: True if the model only supports default temperature.
+        Whether the model only supports default temperature (e.g. some gpt-5 / o*).
         """
         restricted_patterns = [
             "gpt-5-",
@@ -213,24 +259,13 @@ class LangChainClient(BaseAIClient):
         return any(pattern in self.model_name for pattern in restricted_patterns)
 
     def _supports_json_object(self) -> bool:
-        """
-        Check if the model supports json_object response_format.
-
-        Some models like gpt-5-nano-* don't support the json_object response_format
-        and will return text even when requested.
-
-        Returns:
-            bool: True if the model supports json_object format.
-        """
-        # Models that don't support json_object format
+        """Whether OpenAI json_object response_format is expected to work."""
         unsupported_patterns = [
             "gpt-5-nano-",
-            "gpt-5-mini-",  # não respeita response_format json_object; usar instrução no prompt
+            "gpt-5-mini-",
         ]
 
-        # If model matches unsupported patterns, return False
         if any(pattern in self.model_name for pattern in unsupported_patterns):
             return False
 
-        # Default to supporting json_object for other models
         return True

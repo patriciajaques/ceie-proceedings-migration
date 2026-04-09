@@ -5,9 +5,9 @@ from src.services.article_extractor import ArticleExtractor
 from src.services.migrator import Migrator
 from src.logging.json_logger import JsonLogger
 from src.utils.text_processor import TextProcessor
+from src.graphs.migration.models import MigrationGraphInput
+from src.graphs.migration.service import MigrationGraphService
 import os
-from pathlib import Path
-from dotenv import load_dotenv
 
 
 def main():
@@ -15,16 +15,22 @@ def main():
     Main entry point for the application.
     Initializes components and executes the migration process.
     """
-    # Load environment variables from project root .env
-    project_root = Path(__file__).resolve().parent.parent
-    env_path = project_root / ".env"
-    load_dotenv(dotenv_path=env_path)
-
-    # Load configuration
+    # Config (loads config.json, prompts path, and .env via ConfigLoader)
     config_loader = ConfigLoader("config/config.json")
+
+    # LangSmith rejects trace fields > ~25 MB; PDF-heavy prompts exceed that limit.
+    # Optional key langchain_tracing in config.json overrides .env for this run.
+    _lt = config_loader.get_config_value("langchain_tracing", default=None)
+    if _lt is False:
+        os.environ["LANGCHAIN_TRACING_V2"] = "false"
+    elif _lt is True:
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
 
     # Initialize JsonLogger with configuration
     JsonLogger.initialize(config_loader)
+
+    year = config_loader.get_config_value("year")
+    print(f"Gerando os metadados dos anais do SBIE {year}")
 
     # Clientes de IA via LangChain (um por tipo de prompt)
     client_specs = {
@@ -41,18 +47,12 @@ def main():
     # Create text processor with AI client
     text_processor = TextProcessor(ai_clients["text_processing_client"])
 
-    # Caminho do cache de extração para execução incremental
-    output_dir = config_loader.get_config_value("output_dir")
-    year = config_loader.get_config_value("year")
-    extraction_cache_path = os.path.join(output_dir, str(year), "logs", "extraction_cache.json")
-
     # Initialize the article extractor with AI clients and text processor
     article_extractor = ArticleExtractor(
         ai_clients["article_ai_client"],
         ai_clients["references_ai_client"],
         ai_clients["field_completion_ai_client"],
         text_processor,
-        extraction_cache_path=extraction_cache_path,
     )
 
     migrator = Migrator(config_loader, article_extractor)
@@ -60,11 +60,32 @@ def main():
     # Configuration for execution
     pages_to_process = config_loader.get_config_value("pages_to_process")
     files_to_download = config_loader.get_config_value("files_to_download")
+    article_offset = config_loader.get_config_value("article_offset", default=0)
+    skip_fully_processed = config_loader.get_config_value(
+        "skip_fully_processed_articles", default=True
+    )
+    _mc = config_loader.get_config_value("max_concurrency", default=None)
+    max_concurrency = int(_mc) if _mc is not None else None
 
-    # Execute the migration process
-    articles = migrator.migrate(pages_to_process, files_to_download)
+    # Execute the migration process via LangGraph (central pipeline)
+    graph_service = MigrationGraphService(
+        config_loader=config_loader,
+        migrator=migrator,
+    )
+    result = graph_service.run(
+        MigrationGraphInput(
+            pages_to_process=pages_to_process,
+            files_to_download=files_to_download,
+            article_offset=int(article_offset),
+            skip_fully_processed_articles=bool(skip_fully_processed),
+            max_concurrency=max_concurrency,
+        )
+    )
 
-    print(f"Migration completed successfully. Processed {len(articles)} articles.")
+    print(
+        "Migration completed successfully. "
+        f"Processed {len(result.articles)} articles."
+    )
 
 
 if __name__ == "__main__":

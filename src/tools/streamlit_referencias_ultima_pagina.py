@@ -5,13 +5,8 @@ Right side: last N pages as images in a scrollable area; last 2 at the bottom,
 scroll up to see previous pages. No header crop.
 """
 import base64
-import logging
 import os
-import warnings
 from pathlib import Path
-
-
-
 import fitz
 import pandas as pd
 import streamlit as st

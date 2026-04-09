@@ -181,9 +181,9 @@ class PDFProcessor:
                 }
                 allFilesData.append(fileData)
                 if save_files:
-                    # Save the dictionary to a .json file
-                    os.makedirs("outputs/text", exist_ok=True)
-                    with open("outputs/text/" + base_filename + ".json", "w") as f:
+                    # Save the dictionary to a .json file (under output/, same root as migration)
+                    os.makedirs("output/text", exist_ok=True)
+                    with open("output/text/" + base_filename + ".json", "w") as f:
                         json.dump(fileData, f)
         return allFilesData
 

@@ -9,19 +9,19 @@ Não inclui documentação de código (docstrings); foco em **como usar** cada c
 
 O projeto extrai e processa metadados de artigos acadêmicos a partir de PDFs e do site OJS (Open Journal System), para migração dos anais do SBIE/WIE (CEIE/SBC) para o servidor SOL da SBC ou site dedicado.
 
-**Fluxo principal (site-first):**
+**Fluxo principal (site-first):** a orquestração é um **grafo LangGraph** (`src/graphs/migration/`), com estado compartilhado (`MigrationState`) entre nós. Serviços como `Migrator`, `PDFDownloader` e `ArticleExtractor` são invocados **a partir dos nós** do grafo.
 
 1. Coletar metadados dos artigos no Milanesa/OJS (issue + páginas `rt/metadata`) e **validar o ano** do `config` contra o inferido pelos DOIs (aborta se divergir).  
 2. Baixar os PDFs da mesma issue.  
 3. Extrair texto dos PDFs **apenas** para contagem de páginas e **referências bibliográficas** (IA nas últimas páginas / seção).  
-4. Completar com IA apenas os campos ainda vazios (field completion, mesmo critério de antes).  
+4. Completar com IA apenas os campos ainda vazios (field completion).  
 5. Gerar CSVs padronizados: Artigos, Autores, Referências, Seções.  
 
 **Estrutura de saída (por ano):**
 
 - `output/{year}/pdfs/` — PDFs baixados  
 - `output/{year}/csv/` — Artigos.csv, Autores.csv, Referencias.csv, Secoes.csv  
-- `output/{year}/logs/` — JSONs de estado, cache de extração, logs de chamadas à IA  
+- `output/{year}/logs/` — JSONs de estado, cache de referências por artigo (`references_cache.json`), logs de chamadas à IA  
 
 ---
 
@@ -29,7 +29,7 @@ O projeto extrai e processa metadados de artigos acadêmicos a partir de PDFs e 
 
 ### 2.1 Ambiente
 
-- Python 3.x com dependências em `src/requirements.txt`  
+- Python 3.x com dependências em `src/requirements.txt` (inclui **LangChain** para LLMs e **LangGraph** para o grafo da migração central)  
 - Uso recomendado: ambiente conda `llms` (comandos abaixo com `conda run -n llms` quando aplicável)  
 - Variáveis de ambiente carregadas do `.env` na raiz do projeto  
 
@@ -81,11 +81,16 @@ python src/main.py
 **O que acontece:**
 
 1. Carrega `.env` e `config/config.json`  
-2. Inicializa clientes de IA (LangChain) e o extrator de artigos  
-3. Executa o `Migrator`: metadados OJS + validação de ano → download de PDFs → texto dos PDFs (páginas + referências) → inferência de prefixo DOI → field completion → escrita dos CSVs  
-4. Gera `output/{year}/csv/Artigos.csv`, `Autores.csv`, `Referencias.csv`, `Secoes.csv` e arquivos em `output/{year}/logs/`  
+2. Inicializa `JsonLogger`, clientes de IA (LangChain), `TextProcessor`, `ArticleExtractor` e `Migrator`  
+3. Constrói `MigrationGraphService` e executa o grafo LangGraph (`build_migration_graph` → `invoke` com `MigrationGraphInput`: `pages_to_process`, `files_to_download`)  
+4. Os nós do grafo, em sequência, disparam: metadados OJS → validação de ano → download de PDFs → inferência de prefixo DOI → seções (`Secoes.csv`) → montagem dos artigos a partir do site → enriquecimento via PDF (páginas + referências, com cache em `references_cache.json`) → field completion e escrita dos CSVs (`Migrator.finalize_field_completion_outputs`, `CsvWriter`, `por_workshop/`)  
+5. Gera `output/{year}/csv/Artigos.csv`, `Autores.csv`, `Referencias.csv`, `Secoes.csv` e arquivos em `output/{year}/logs/`  
+
+**Código relacionado:** `src/graphs/migration/` — `state.py` (estado Pydantic), `nodes.py` (tarefas por nó), `graph.py` (arestas do grafo), `service.py` (`MigrationGraphService`), `models.py` (contratos de entrada/saída do serviço).
 
 **Parâmetros de execução:** vêm de `config.json` (`pages_to_process`, `files_to_download`, etc.). Não há argumentos de linha de comando no `main.py`.
+
+**Ferramentas em `src/tools/`:** scripts independentes; reutilizam os mesmos serviços onde aplicável.
 
 ---
 
@@ -219,7 +224,7 @@ Estes são pontos de entrada secundários, em geral para teste ou uso interno; a
 
 | Arquivo | Uso como script | Observação |
 |---------|----------------------------------|------------|
-| `src/utils/pdf_processor.py` | Processa todos os PDFs de um diretório e grava em `outputs/text/` | Diretório hardcoded no exemplo; preferir migração completa |
+| `src/utils/pdf_processor.py` | Processa todos os PDFs de um diretório e grava em `output/text/` | Diretório hardcoded no exemplo; preferir migração completa |
 | `src/services/pdf_downloader.py` | Baixa PDFs de uma URL OJS para um diretório | URL e diretório no `if __name__`; a migração já usa esse serviço |
 | `src/services/anais_ojs_html_parser.py` | Extrai informações dos artigos do site e grava em `temp/articles_info.json` | Integrado na migração; uso direto só para debug/inspeção |
 
@@ -243,6 +248,7 @@ Sempre executar na **raiz do projeto** e, em ambiente sandbox/CI, usar `conda ru
 
 ## 7. Convenções do projeto
 
+- **Orquestração central:** LangGraph em `src/graphs/migration/`; chamadas à IA continuam via LangChain (`LangChainClient`).  
 - **Arquivos temporários:** devem ficar em `temp/` (raiz) ou `src/temp/` conforme regras do projeto.  
 - **CSVs:** delimitador `;`, encoding UTF-8; evitar vírgulas dentro de campos.  
 - **Backups:** ferramentas que alteram CSVs (ex.: `fill_referencias_missing`) fazem backup em `output/{year}/csv/backups/` antes de modificar.  

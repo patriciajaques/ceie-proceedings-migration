@@ -1,5 +1,9 @@
 # src/services/migrator.py
+from __future__ import annotations
+
 import json
+from typing import Any
+
 from src.config.config_loader import ConfigLoader
 from src.services.pdf_downloader import PDFDownloader
 from src.utils.pdf_processor import PDFProcessor
@@ -13,9 +17,14 @@ import os
 import re
 
 
+def _article_id_from_dict(d: dict[str, Any]) -> str:
+    """Stable id for merge keys (website uses idJEMS)."""
+    return str(d.get("idJEMS") or d.get("id_jems") or "").strip()
+
+
 class Migrator:
     """
-    Orchestrates migration: OJS website metadata first, then PDFs for pages and references.
+    Services used by the LangGraph migration pipeline (nodes in src/graphs/migration/).
 
     Website (Milanesa/OJS) is the primary source for titles, authors, abstracts, and DOIs.
     PDF text is used for page counts and reference extraction; field completion fills gaps.
@@ -51,136 +60,6 @@ class Migrator:
         self.processor = PDFProcessor(self.pdf_save_dir)
         self.parser = OJSHTMLParser(self.site_url)
         self.extractor = article_extractor
-
-    def migrate(self, num_pages=11, num_files=-1):
-        """
-        Executes the migration process: downloads PDFs, extracts metadata, and generates CSV files.
-
-        Args:
-            num_pages (int): Number of pages to process from each PDF.
-            num_files (int, optional): Number of PDF files to download. Default is -1, which downloads all files.
-
-        Returns:
-            list: List of Article objects containing article metadata.
-        """
-        # 0) Fetch website metadata early and validate year before any downloads
-        website_articles_data_list = self._get_website_articles_data(num_files)
-        self._validate_year_matches_site_or_abort(website_articles_data_list)
-
-        # 1) Download all PDFs from the specified website to a directory
-        self.downloader.donwload_pdf_files_from_url(num_files)
-
-        # 2) Extract article information from the downloaded PDFs
-        articles_list = self.extract_metadata(
-            num_files,
-            num_pages,
-            website_articles_data_list=website_articles_data_list,
-        )
-
-        # 3) Complete missing fields in the articles by calling the AI API
-        self.complete_missing_fields(articles_list)
-
-        # 4) Return the processed metadata
-        return articles_list
-
-    def extract_metadata(
-        self,
-        num_files=-1,
-        num_pages=11,
-        website_articles_data_list=None,
-    ):
-        """
-        Extracts metadata from the PDFs and website.
-
-        Args:
-            num_files (int, optional): Number of PDF files to process. Default is -1, which processes all files.
-            num_pages (int, optional): Number of pages to process from each PDF. Default is 11.
-
-        Returns:
-            list: List of Article objects containing article metadata.
-        """
-        # 1) Process all PDFs in the directory, extracting the text
-        all_files_data = self.processor.process_all_pdfs(
-            save_files=False, number_of_pages_to_process=num_pages
-        )
-
-        # 2) Extract article information from the website (usa cache se existir)
-        # If provided by migrate(), reuse to avoid duplicate HTTP/cache reads.
-        if website_articles_data_list is None:
-            website_articles_data_list = self._get_website_articles_data(num_files)
-
-        # Infer DOI prefix from DOIs extracted from website metadata pages
-        extracted_dois = []
-        for website_article in website_articles_data_list or []:
-            if isinstance(website_article, dict) and website_article.get("doi"):
-                extracted_dois.append(website_article["doi"])
-        if extracted_dois:
-            self.inferred_doi_prefix = self._infer_doi_prefix(extracted_dois)
-            if self.inferred_doi_prefix:
-                print(
-                    f"Prefixo DOI inferido automaticamente a partir do site: {self.inferred_doi_prefix}"
-                )
-
-        # 2.5) Extract sections from the website and generate Secoes.csv
-        sections_data = self.parser.extract_sections_from_website()
-        CsvWriter.write_sections_csv(self.csv_save_dir, sections_data)
-
-        # 3) Build Article objects from WEBSITE metadata first (source of truth)
-        articles_list = []
-        for website_article in website_articles_data_list or []:
-            if not isinstance(website_article, dict):
-                continue
-            articles_list.append(Article.from_dict(website_article))
-
-        # 4) Enrich from PDFs ONLY what the website doesn't provide:
-        # - num_pages/pages
-        # - references (for non-editorials)
-        pdf_by_id = {
-            (item.get("base_filename") or "").strip(): item
-            for item in (all_files_data or [])
-            if isinstance(item, dict) and (item.get("base_filename") or "").strip()
-        }
-        for article in articles_list:
-            id_jems = getattr(article, "id_jems", "") or ""
-            pdf_item = pdf_by_id.get(str(id_jems).strip())
-            if pdf_item:
-                # Update num_pages/pages using PDF-derived numPages
-                num_pages_pdf = pdf_item.get("numPages", 0) or 0
-                try:
-                    article.num_pages = int(num_pages_pdf)
-                except Exception:
-                    article.num_pages = 0
-                article.pages = self.update_pages(
-                    article.first_page, article.num_pages
-                )
-
-                # Extract references from PDF only for non-editorials
-                if getattr(article, "section_abbrev", "") != "EDT":
-                    refs = self._extract_references_from_pdf_item(pdf_item)
-                    article.references = [
-                        Reference.from_dict(r) if isinstance(r, dict) else Reference(
-                            description=str(r), order=i
-                        )
-                        for i, r in enumerate(refs, start=1)
-                    ]
-                else:
-                    article.references = []
-
-            # Normalize or generate DOI for every article (with or without PDF)
-            self.correct_doi(article)
-
-        # 5) Log article metadata before field completion (convert to dict for logging)
-        articles_dict_list = [article.to_dict() for article in articles_list]
-        JsonLogger.print_json(
-            "articles_metadata_antes_do_field_completion", articles_dict_list
-        )
-
-        # Guardar dados dos PDFs para uso no field completion (quando resumo estiver vazio)
-        self._last_pdf_files_data = all_files_data
-
-        # Note: CSV files will be generated after field completion in complete_missing_fields()
-
-        return articles_list
 
     def _extract_references_from_pdf_item(self, pdf_item: dict) -> list[dict]:
         """
@@ -288,10 +167,32 @@ class Migrator:
                 "para o issue correto."
             )
 
-    def _get_website_articles_data(self, num_files: int):
+    @staticmethod
+    def _slice_article_list(
+        full_list: list,
+        num_files: int,
+        offset: int,
+    ) -> list:
+        """Return full_list[offset : offset + num_files] or tail when num_files == -1."""
+        if offset < 0:
+            offset = 0
+        if not full_list or offset >= len(full_list):
+            return []
+        if num_files == -1:
+            return full_list[offset:]
+        return full_list[offset : offset + num_files]
+
+    def _get_website_articles_data(self, num_files: int, offset: int = 0):
         """
         Obtém metadados dos artigos do site. Usa cache em execuções subsequentes
         para evitar novas requisições HTTP ao site.
+
+        Para forçar nova raspagem (ex.: após mudar siglas no parser), apague
+        ``website_articles_cache.json`` em ``output/{year}/logs/``.
+
+        Args:
+            num_files: Quantidade de artigos a processar (-1 = todos a partir de offset).
+            offset: Ignorar os primeiros N artigos (ordem da edição no cache).
         """
         cache_path = os.path.join(
             self.output_dir, str(self.year), "logs", "website_articles_cache.json"
@@ -304,9 +205,7 @@ class Migrator:
                     print(
                         f"Metadados do site carregados do cache ({len(cached)} artigos)"
                     )
-                    if num_files != -1:
-                        return cached[:num_files]
-                    return cached
+                    return self._slice_article_list(cached, num_files, offset)
         except (json.JSONDecodeError, IOError):
             pass
 
@@ -317,14 +216,14 @@ class Migrator:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         with open(cache_path, "w", encoding="utf-8") as f:
             json.dump(website_articles_data_list, f, ensure_ascii=False, indent=2)
-        if num_files != -1:
-            return website_articles_data_list[:num_files]
-        return website_articles_data_list
+        return self._slice_article_list(website_articles_data_list, num_files, offset)
 
-    def _load_completion_cache(self):
+    def _logs_dir(self) -> str:
+        return os.path.join(self.output_dir, str(self.year), "logs")
+
+    def _load_articles_metadata_apos_dicts(self) -> list[dict[str, Any]]:
         """
-        Carrega o cache de field completion de execuções anteriores.
-        Retorna um dicionário {idJEMS: article_dict} para reutilizar artigos já processados.
+        Load previously saved post-field-completion article dicts (any batch).
         """
         try:
             data = JsonLogger.read_json_file(
@@ -333,13 +232,80 @@ class Migrator:
             if isinstance(data, dict) and "data" in data:
                 data = data["data"]
             if isinstance(data, list):
-                return {
-                    (d.get("idJEMS") or d.get("id_jems", "")): d
-                    for d in data
-                    if d.get("idJEMS") or d.get("id_jems")
-                }
-        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+                return [d for d in data if isinstance(d, dict) and _article_id_from_dict(d)]
+        except (FileNotFoundError, json.JSONDecodeError, KeyError, OSError):
             pass
+        return []
+
+    def _full_issue_id_order(self) -> list[str]:
+        """
+        idJEMS order as in website_articles_cache.json (full issue list).
+        """
+        cache_path = os.path.join(self._logs_dir(), "website_articles_cache.json")
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError, FileNotFoundError):
+            return []
+        if not isinstance(data, list):
+            return []
+        ids: list[str] = []
+        for item in data:
+            if isinstance(item, dict):
+                k = _article_id_from_dict(item)
+                if k:
+                    ids.append(k)
+        return ids
+
+    def _merge_articles_for_full_output(
+        self,
+        previous_dicts: list[dict[str, Any]],
+        current_batch: list[Article],
+    ) -> list[Article]:
+        """
+        Merge prior runs with the current batch; current batch wins on id collision.
+        Order follows full issue list when available, else seq.
+        """
+        by_id: dict[str, dict[str, Any]] = {}
+        for d in previous_dicts:
+            k = _article_id_from_dict(d)
+            if k:
+                by_id[k] = d
+        for article in current_batch:
+            d = article.to_dict()
+            k = _article_id_from_dict(d)
+            if k:
+                by_id[k] = d
+
+        order = self._full_issue_id_order()
+        merged_dicts: list[dict[str, Any]] = []
+        if order:
+            seen: set[str] = set()
+            for oid in order:
+                if oid in by_id:
+                    merged_dicts.append(by_id[oid])
+                    seen.add(oid)
+            for k, d in sorted(by_id.items()):
+                if k not in seen:
+                    merged_dicts.append(d)
+        else:
+            merged_dicts = list(by_id.values())
+            merged_dicts.sort(
+                key=lambda x: (
+                    int(x.get("seq") or 0),
+                    _article_id_from_dict(x),
+                )
+            )
+        return [Article.from_dict(d) for d in merged_dicts]
+
+    def _load_completion_cache(self):
+        """
+        Carrega o cache de field completion de execuções anteriores.
+        Retorna um dicionário {idJEMS: article_dict} para reutilizar artigos já processados.
+        """
+        by_list = self._load_articles_metadata_apos_dicts()
+        if by_list:
+            return {_article_id_from_dict(d): d for d in by_list}
         return {}
 
     def _build_pdf_raw_by_id(self):
@@ -359,58 +325,43 @@ class Migrator:
             raw_by_id[base_filename] = first_pages
         return raw_by_id
 
-    def complete_missing_fields(self, articles_list):
+    def finalize_field_completion_outputs(
+        self, updated_articles: list[Article]
+    ) -> list[Article]:
         """
-        Completes missing fields in article metadata using AI.
+        Log JSON and write CSVs after field completion.
 
-        Usa cache incremental: artigos já completados em execuções anteriores
-        são reutilizados e não passam pela IA novamente.
-
-        Args:
-            articles_list (list): List of Article objects containing article metadata.
+        Merges articles from previous runs (articles_metadata_apos_do_field_completion.json)
+        with the current batch so CSVs always list every article processed so far, in issue
+        order (website_articles_cache.json). Current batch overwrites same idJEMS.
 
         Returns:
-            list: Updated list of Article objects with completed article metadata.
+            Full merged list of Article objects (for graph state).
         """
-        if not articles_list:
-            # Load JSON file with article metadata for testing
-            articles_dict_list = JsonLogger.read_json_file(
-                "articles_metadata_antes_do_field_completion.json"
+        previous = self._load_articles_metadata_apos_dicts()
+        merged_articles = self._merge_articles_for_full_output(previous, updated_articles)
+        merged_dicts = [a.to_dict() for a in merged_articles]
+
+        if len(merged_articles) > len(updated_articles):
+            print(
+                f"Saída agregada: {len(merged_articles)} artigo(s) no total "
+                f"({len(updated_articles)} deste lote + "
+                f"{len(merged_articles) - len(updated_articles)} de execuções anteriores).",
+                flush=True,
             )
-            # Convert dictionaries back to Article objects
-            articles_list = [
-                Article.from_dict(article_dict) for article_dict in articles_dict_list
-            ]
 
-        # Carrega cache de field completion de execuções anteriores (incremental)
-        completion_cache = self._load_completion_cache()
-
-        # Mapa id_jems -> texto bruto (sem clean_text); clean_text só é chamado por artigo ao usar
-        pdf_raw_by_id = self._build_pdf_raw_by_id()
-
-        # Complete missing fields in articles using AI (usa cache para pular já processados)
-        updated_articles = self.extractor.do_field_completion_of_missing_values_in_dic(
-            articles_list,
-            completion_cache=completion_cache,
-            pdf_raw_by_id=pdf_raw_by_id,
-        )
-
-        # Log article metadata after field completion (convert to dict for logging)
-        updated_articles_dict = [article.to_dict() for article in updated_articles]
         JsonLogger.print_json(
-            "articles_metadata_apos_do_field_completion", updated_articles_dict
+            "articles_metadata_apos_do_field_completion", merged_dicts
         )
 
-        # Write article information to CSV files (final version after field completion)
         csv_writer = CsvWriter(
             self.csv_save_dir, "Artigos.csv", "Autores.csv", "Referencias.csv", antes=False
         )
-        csv_writer.write_dicts_to_csv(updated_articles)
+        csv_writer.write_dicts_to_csv(merged_articles)
 
-        # Write CSV files separated by workshop/section
-        self.write_csv_by_workshop(updated_articles)
+        self.write_csv_by_workshop(merged_articles)
 
-        return updated_articles
+        return merged_articles
 
     def update_pages(self, first_page, num_pages):
         """

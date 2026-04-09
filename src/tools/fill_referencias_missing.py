@@ -60,7 +60,6 @@ def _load_config_and_deps():
         ai_clients["references_ai_client"],
         ai_clients["field_completion_ai_client"],
         text_processor,
-        extraction_cache_path=None,
     )
     return config_loader, article_extractor, text_processor
 

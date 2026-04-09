@@ -29,9 +29,10 @@ migracao-refatorado/
     ├── adapters/               # AI service adapters
     ├── config/                 # Configuration management
     ├── domain/                 # Domain model classes
+    ├── graphs/                 # LangGraph orchestration (central migration pipeline)
     ├── io/                     # Input/output operations
     ├── logging/                # Logging utilities
-    ├── services/               # Core business logic
+    ├── services/               # Core business logic (Migrator helpers, extractors, parsers)
     ├── temp/                   # Temporary files (all temp files must be created here)
     ├── utils/                  # Utility functions
     └── main.py                 # Application entry point
@@ -53,7 +54,8 @@ All domain classes inherit from `BaseModel`, which provides common functionality
 
 The service layer contains the core business logic:
 
-- **Migrator**: Orchestrates the entire migration process
+- **MigrationGraphService** (`src/graphs/migration/`): Runs the LangGraph pipeline for the full migration
+- **Migrator**: Helpers for website data, PDF enrichment, DOI handling, and CSV writing (invoked by graph nodes)
 - **ArticleExtractor**: Extracts structured metadata from text using AI
 - **PDFDownloader**: Downloads PDF files from academic websites
 - **PDFProcessor**: Extracts text from PDF files
@@ -65,7 +67,7 @@ The system can use multiple AI services through a consistent interface:
 
 - **LangChainClient**: Cliente unificado via LangChain (OpenAI, Anthropic, etc.). É o único cliente em uso; falhas de conexão ou inicialização abortam a execução.
 
-All clients implement the `AIClientInterface` and inherit from `BaseAIClient`.
+The LangChain client implements `AIClientInterface` (`LangChainClient`).
 
 Clients are created directly as `LangChainClient(config_loader, prompt_key)`; the provider is inferred from the model name in config. Connection or initialization failures abort execution.
 
@@ -73,9 +75,7 @@ Clients are created directly as `LangChainClient(config_loader, prompt_key)`; th
 
 The application uses a robust configuration system:
 
-- **ConfigLoader**: Loads configuration from JSON files
-- **CredentialsManagerInterface**: Abstract interface for credential management
-- **AnthropicCredentialsManager** and **OpenAICredentialsManager**: Manage API credentials
+- **ConfigLoader**: Loads `config.json`, resolves paths to prompts (YAML), loads `.env` from the project root, and exposes `get_api_key_for_provider()` for LLM keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.)
 
 ### Utilities
 
@@ -87,12 +87,13 @@ The application uses a robust configuration system:
 ### Workflow
 
 1. **Initialization**: The application reads configuration from `config.json` and sets up all components
-2. **Website metadata**: OJS HTML parsing loads titles, authors, abstracts, DOIs, etc.; the configured year is checked against DOIs before any PDF download
-3. **PDF Download**: PDFs are downloaded for the same issue
-4. **Text extraction (targeted)**: PDF text is used for page counts and **references** extraction (AI); full article metadata is **not** taken from the PDF first
-5. **Completion**: AI fills in any missing fields (same field-completion step as before)
-6. **Affiliation Correction**: Author affiliations can be standardized and translated (via dedicated tools when run)
-7. **Output Generation**: Three CSV files are produced:
+2. **LangGraph run**: The central pipeline executes as a graph of steps (see `src/graphs/migration/graph.py`)
+3. **Website metadata**: OJS HTML parsing loads titles, authors, abstracts, DOIs, etc.; the configured year is checked against DOIs before enrichment
+4. **PDF Download**: PDFs are downloaded for the same issue
+5. **Text extraction (targeted)**: PDF text is used for page counts and **references** extraction (AI); article titles and abstracts come from the website
+6. **Completion**: AI fills in any missing fields (field completion)
+7. **Affiliation Correction**: Author affiliations can be standardized and translated (via dedicated tools when run)
+8. **Output Generation**: Three CSV files are produced:
    - Articles.csv: Article metadata
    - Autores.csv: Author information
    - Referencias.csv: Bibliographic references
@@ -103,7 +104,6 @@ The system uses AI for these main tasks in the default migration:
 
 1. **References Extraction**: Extracts bibliography from the reference section / last pages of each PDF
 2. **Field Completion**: Fills in missing data when the website did not provide a value
-3. **Optional / legacy**: Full metadata extraction from PDF text (`extract_articles_data_from_PDF_text`) is **not** used by the main `Migrator` path anymore; it remains in the codebase for experiments or tooling
 
 ## Configuration
 
@@ -251,7 +251,7 @@ To add support for a new provider through LangChain:
 
 1. Install the corresponding LangChain package: `pip install langchain-{provider}`
 2. Update `LangChainClient._detect_provider()` to recognize the new model patterns
-3. Add initialization logic in `LangChainClient.initialize_client()` for the new provider
-4. Update `LangChainClient.get_credentials_manager()` if needed for credential management
+3. Add initialization logic in `LangChainClient._initialize_client()` for the new provider
+4. Map the new provider to an environment variable in `ConfigLoader.get_api_key_for_provider()` if it uses a dedicated key
 
 The factory will automatically use the new provider when the model name matches the pattern.

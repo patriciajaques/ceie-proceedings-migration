@@ -305,6 +305,14 @@ class OJSHTMLParser:
             or "short papers" in section_name_lower
         ):
             return "ART-R"
+        # Milanesa often labels full papers as "Artigos (Papers)" without "completos"
+        if (
+            "artigos" in section_name_lower
+            and "papers" in section_name_lower
+            and "short" not in section_name_lower
+            and "resumid" not in section_name_lower
+        ):
+            return "ART-C"
 
         # For workshops, try to extract the workshop acronym
         # Examples: "Workshop da Licenciatura em Computação (WLIC)" -> "WLIC"
@@ -314,8 +322,10 @@ class OJSHTMLParser:
             return acronym_match.group(1)
 
         # If no acronym found, create one from the first letters of significant words
+        # Drop parenthetical text so "(Papers)" does not yield "(" as an initial
+        section_for_words = re.sub(r"\([^)]*\)", " ", section_name)
+        words = section_for_words.split()
         # Remove common words and prepositions
-        words = section_name.split()
         stop_words = {
             "da",
             "de",

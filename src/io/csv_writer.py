@@ -3,8 +3,6 @@ import csv
 import json
 import os
 import re
-from src.domain.article import Article
-from typing import List, Union, Dict, Any, Callable
 
 
 class CsvWriter:

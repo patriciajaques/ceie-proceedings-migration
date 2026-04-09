@@ -1,14 +1,33 @@
 # Diagrama de chamadas – CEIE Proceedings Migration
 
-O projeto **não usa LangGraph**. Usa **LangChain** (ChatOpenAI, ChatAnthropic, etc.) apenas para abstrair chamadas a LLMs (OpenAI, Anthropic, etc.).
+A **orquestração da migração central** usa **LangGraph** (`src/graphs/migration/`), com estado compartilhado `MigrationState` (Pydantic) passado entre nós. **LangChain** (ChatOpenAI, ChatAnthropic, etc.) abstrai as chamadas a LLMs (OpenAI, Anthropic, etc.).
 
-Fluxo resumido: `main` → carrega config e clientes de IA → cria `Migrator` → `migrate()` busca metadados no Milanesa/OJS, **valida o ano** (DOIs), baixa PDFs, extrai texto dos PDFs só para **páginas + referências**, completa campos faltantes com IA (B2) e grava CSVs.
+Fluxo de entrada: `main` → `MigrationGraphService.run()` → grafo compilado (`build_migration_graph.invoke`) → cada nó chama métodos do `Migrator` e demais serviços. A ordem no grafo é linear: `infer_doi_prefix` e `extract_sections` executam **antes** do processamento completo dos PDFs no nó `enrich_from_pdfs`.
+
+Fluxo lógico (site-first): metadados no Milanesa/OJS → **validar o ano** (DOIs) → baixar PDFs → inferir prefixo DOI → **Secoes.csv** → montar `Article` a partir do site → enriquecer com PDF (**páginas + referências**, cache em `references_cache.json`) → field completion → CSVs.
+
+---
+
+## Grafo LangGraph (pipeline central)
+
+Ordem dos nós em `src/graphs/migration/graph.py`:
+
+```mermaid
+flowchart LR
+    A[fetch_website_articles] --> B[validate_year]
+    B --> C[download_pdfs]
+    C --> D[infer_doi_prefix]
+    D --> E[extract_sections]
+    E --> F[build_articles]
+    F --> G[enrich_from_pdfs]
+    G --> H[field_completion_and_write_csvs]
+```
 
 ---
 
 ## Diagrama de sequência (chamadas principais)
 
-Cada caixa é um método/função; setas indicam “quem chama quem”.
+Cada caixa é um método/função; setas indicam “quem chama quem”. O `Migrator` é usado pelos **nós** do grafo.
 
 ```mermaid
 sequenceDiagram
@@ -19,45 +38,48 @@ sequenceDiagram
     participant TextProcessor
     participant ArticleExtractor
     participant Migrator
+    participant GraphSvc as MigrationGraphService
+    participant Graph as LangGraph compiled
     participant PDFDownloader
     participant PDFProcessor
     participant OJSHTMLParser
     participant CsvWriter
 
     main->>ConfigLoader: __init__(filepath)
-    ConfigLoader->>ConfigLoader: load_configuration()
+    ConfigLoader->>ConfigLoader: _load_dotenv(), load_configuration()
     main->>JsonLogger: initialize(config_loader)
     main->>LangChainClient: __init__(x5 clientes)
-    LangChainClient->>LangChainClient: _detect_provider(), get_credentials_manager(), initialize_client()
+    LangChainClient->>LangChainClient: _detect_provider(), _initialize_client()
     main->>TextProcessor: __init__(ai_client)
     main->>ArticleExtractor: __init__(ai_clients, text_processor, ...)
     main->>Migrator: __init__(config_loader, article_extractor)
-    main->>Migrator: migrate(pages_to_process, files_to_download)
+    main->>GraphSvc: MigrationGraphService(config_loader, migrator)
+    main->>GraphSvc: run(MigrationGraphInput)
+    GraphSvc->>Graph: build_migration_graph(...); invoke(MigrationState)
 
-    Migrator->>Migrator: _get_website_articles_data(num_files)
-    Migrator->>Migrator: _validate_year_matches_site_or_abort(website_articles_data_list)
+    Note over Graph,Migrator: Nós do grafo (via nodes.py)
 
-    Migrator->>PDFDownloader: donwload_pdf_files_from_url(num_files)
+    Graph->>Migrator: _get_website_articles_data(num_files)
+    Graph->>Migrator: _validate_year_matches_site_or_abort(website_articles_data_list)
+
+    Graph->>PDFDownloader: donwload_pdf_files_from_url(num_files)
     PDFDownloader->>PDFDownloader: get_pdf_urls()
     loop por cada PDF
         PDFDownloader->>PDFDownloader: download_and_save_pdf(url)
     end
 
-    Migrator->>Migrator: extract_metadata(num_files, num_pages, website_articles_data_list)
-    Migrator->>PDFProcessor: process_all_pdfs(save_files, number_of_pages_to_process)
+    Graph->>Migrator: _infer_doi_prefix (a partir dos DOIs do site)
+    Migrator->>OJSHTMLParser: extract_sections_from_website()
+    Migrator->>CsvWriter: write_sections_csv(csv_save_dir, sections_data)
+
+    Graph->>Migrator: Article.from_dict por artigo (build_articles)
+
+    Graph->>PDFProcessor: process_all_pdfs(save_files, number_of_pages_to_process)
     loop por cada PDF
         PDFProcessor->>PDFProcessor: extract_text_from_each_page(pdf_path)
     end
 
-    Note over Migrator: Metadados do site já foram obtidos antes do download; aqui reutiliza a lista passada.
-
-    Migrator->>Migrator: _infer_doi_prefix (a partir dos DOIs do site)
-    Migrator->>OJSHTMLParser: extract_sections_from_website()
-    Migrator->>CsvWriter: write_sections_csv(csv_save_dir, sections_data)
-
-    loop por cada artigo (site como fonte principal)
-        Migrator->>Migrator: Article.from_dict(website_article)
-    end
+    Note over Graph,Migrator: enrich_from_pdfs: _extract_references_from_pdf_item, references_cache.json
 
     loop por artigo com PDF correspondente (idJEMS = base_filename)
         Migrator->>Migrator: update_pages(first_page, num_pages)
@@ -68,7 +90,7 @@ sequenceDiagram
 
     Migrator->>JsonLogger: print_json("articles_metadata_antes_do_field_completion", ...)
 
-    Migrator->>Migrator: complete_missing_fields(articles_list)
+    Graph->>Migrator: finalize_field_completion_outputs(updated_articles)
     Migrator->>Migrator: _load_completion_cache()
     Migrator->>JsonLogger: read_json_file("articles_metadata_apos_do_field_completion.json")
     Migrator->>ArticleExtractor: do_field_completion_of_missing_values_in_dic(articles_list, completion_cache)
@@ -79,60 +101,22 @@ sequenceDiagram
 
 ---
 
-## ArticleExtractor – uso na migração principal vs. legado
+## ArticleExtractor no pipeline central
 
-Na migração atual, o `Migrator` **não** chama `extract_articles_data_from_PDF_text` nem `extract_article_data`. Esses métodos permanecem no código para experimentos ou ferramentas futuras; o fluxo principal usa apenas:
+O grafo usa principalmente:
 
 - `get_reference_pages_text` + `extract_references_metadata_with_ai` (referências a partir do PDF)
 - `extract_pages` (field completion quando o resumo está vazio e precisa de texto das primeiras páginas)
-- `do_field_completion_of_missing_values_in_dic` (campos faltantes, B2)
+- `do_field_completion_of_missing_values_in_dic` (campos faltantes)
 
 ```mermaid
 flowchart TB
-    subgraph migrator_hoje["Migrator (site-first)"]
+    subgraph pipeline["Pipeline central (site-first)"]
         M1[Article.from_dict dados OJS] --> M2[PDF: num_pages, pages]
         M2 --> M3[get_reference_pages_text]
         M3 --> M4[extract_references_metadata_with_ai]
         M4 --> M5[correct_doi]
         M5 --> M6[do_field_completion ...]
-    end
-
-    subgraph legado["Não usado pelo main.py"]
-        L1[extract_articles_data_from_PDF_text] --> L2[extract_article_data]
-        L2 --> L3[extract_metadata_with_ai título/resumo/refs do PDF]
-    end
-```
-
-### Detalhe legado: `extract_articles_data_from_PDF_text` (opcional)
-
-```mermaid
-flowchart TB
-    subgraph extract_articles_data_from_PDF_text
-        A1[_load_extraction_cache] --> A2{para cada PDF}
-        A2 --> A3{cache tem base_filename?}
-        A3 -->|sim| A4[Article.from_dict do cache]
-        A3 -->|não| A5[extract_article_data]
-        A5 --> A6[_save_extraction_cache]
-    end
-
-    subgraph extract_article_data
-        B1[extract_pages first] --> B2[text_processor.clean_text]
-        B2 --> B3[extract_pages last / section]
-        B3 --> B4[extract_metadata_with_ai]
-        B4 --> B5[Article.from_dict]
-    end
-```
-
-### `extract_metadata_with_ai` (dentro de `extract_article_data`)
-
-```mermaid
-flowchart TB
-    subgraph extract_metadata_with_ai
-        C1[extract_article_metadata_with_ai] --> C2[extract_info_with_ai article_ai_client]
-        C2 --> C3{sectionAbbrev != EDT?}
-        C3 -->|sim| C4[extract_references_metadata_with_ai]
-        C4 --> C5[extract_info_with_ai references_ai_client]
-        C3 -->|não| C6[references = []]
     end
 ```
 
@@ -178,9 +162,9 @@ flowchart LR
 
 ---
 
-## Migrator: enriquecimento site-first (substitui merge antigo)
+## Migrator: enriquecimento site-first
 
-O merge antigo (`merge_article_info` + PDF como fonte principal de metadados) foi removido. O fluxo equivalente hoje:
+Metadados vêm do OJS; o PDF complementa páginas e referências.
 
 ```mermaid
 flowchart TB
@@ -192,7 +176,7 @@ flowchart TB
     S4 --> S5
 ```
 
-`_infer_doi_prefix` roda a partir dos DOIs já presentes na lista do site (antes do loop de enriquecimento por PDF).
+`_infer_doi_prefix` usa os DOIs já presentes na lista do site (antes do loop de enriquecimento por PDF).
 
 ---
 
@@ -219,16 +203,17 @@ flowchart TB
 
 | Módulo            | Métodos chamados (principais) |
 |-------------------|-------------------------------|
-| **main**          | ConfigLoader, JsonLogger.initialize, LangChainClient(x5), TextProcessor, ArticleExtractor, Migrator, migrate() |
-| **Migrator**      | _get_website_articles_data, _validate_year_matches_site_or_abort, downloader.donwload_pdf_files_from_url, extract_metadata, _extract_references_from_pdf_item, complete_missing_fields, _load_completion_cache, write_csv_by_workshop, update_pages, correct_doi, _normalize_doi, _infer_doi_prefix |
+| **main**          | ConfigLoader, JsonLogger.initialize, LangChainClient(x5), TextProcessor, ArticleExtractor, Migrator, **MigrationGraphService.run(MigrationGraphInput)** |
+| **langgraph (graph)** | `build_migration_graph` → nós: fetch_website_articles → validate_year → download_pdfs → infer_doi_prefix → extract_sections → build_articles → enrich_from_pdfs → field_completion_and_write_csvs |
+| **MigrationGraphService** | Monta `MigrationState`, chama `graph.invoke(state)`, devolve `MigrationGraphOutput` |
+| **Migrator**      | _get_website_articles_data, _validate_year_matches_site_or_abort, downloader.donwload_pdf_files_from_url, _extract_references_from_pdf_item, finalize_field_completion_outputs, _load_completion_cache, write_csv_by_workshop, update_pages, correct_doi, _normalize_doi, _infer_doi_prefix |
 | **PDFDownloader** | get_pdf_urls, download_and_save_pdf (requests.get) |
 | **PDFProcessor**  | process_all_pdfs, extract_text_from_each_page (fitz) |
 | **OJSHTMLParser** | extract_articles_info_from_the_website, download_html_and_create_parser, extract_sections_from_website, get_metadata, convert_url, _generate_section_abbrev, _make_abbrev_unique |
-| **ArticleExtractor** | get_reference_pages_text, extract_references_metadata_with_ai, extract_pages, extract_info_with_ai, do_field_completion_of_missing_values_in_dic, has_empty_fields, parse_ai_response, _log_ai_call; *legado/não usado pelo main:* extract_articles_data_from_PDF_text, extract_article_data, extract_metadata_with_ai |
+| **ArticleExtractor** | get_reference_pages_text, extract_references_metadata_with_ai, extract_pages, extract_info_with_ai, do_field_completion_of_missing_values_in_dic, has_empty_fields, parse_ai_response, _log_ai_call |
 | **TextProcessor** | clean_text, detect_encoding_errors, basic_cleaning, process_with_ai |
-| **LangChainClient** | _detect_provider, get_credentials_manager, initialize_client (ChatOpenAI/ChatAnthropic), create_completion (invoke messages) |
-| **BaseAIClient**  | load_prompt (ConfigLoader), get_credentials().get("api_key"), initialize_client() |
-| **ConfigLoader**  | load_configuration, get_config_value, load_prompt |
+| **LangChainClient** | _detect_provider, _initialize_client (ChatOpenAI/ChatAnthropic/…), create_completion (invoke messages); uses ConfigLoader.load_prompt + get_api_key_for_provider |
+| **ConfigLoader**  | _load_dotenv, load_configuration, get_config_value, load_prompt, get_api_key_for_provider |
 | **JsonLogger**    | initialize, get_base_dir, _prepare_path, print_json, read_json_file |
 | **CsvWriter**     | load_headers, write_to_csv, write_dicts_to_csv, process_artigos_data, process_autores_data, process_references_data, process_data, process_items_data, write_sections_csv |
 
@@ -236,4 +221,8 @@ flowchart TB
 
 ## Observação
 
-**LangGraph** não é usado. O fluxo é procedural: `main` → `Migrator.migrate()` → metadados OJS + validação de ano → download → texto PDF só para páginas/referências → field completion com IA → escrita em CSV. A IA é usada via **LangChain** (ChatOpenAI, ChatAnthropic, etc.) dentro de `LangChainClient.create_completion()`.
+**LangGraph** orquestra o pipeline central: `main` → `MigrationGraphService` → grafo `invoke` → nós chamam `Migrator` e serviços. A ordem das etapas no grafo é linear (ver seção “Grafo LangGraph”). **LangChain** continua sendo o caminho para chamadas à IA (`LangChainClient.create_completion()`). Ferramentas em `src/tools/` permanecem fora do grafo (scripts à parte).
+
+---
+
+*Última atualização deste diagrama: abril de 2026.*
