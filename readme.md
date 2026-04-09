@@ -11,12 +11,11 @@ The project was developed to facilitate the migration of proceedings from the Br
 This project is an automated tool for extracting and processing academic article metadata from PDF files and web sources. It's designed for the CEIE (Brazilian Commission for Computer Science Education) to help migrate article metadata from conference proceedings and journals to a structured database.
 
 The system performs the following high-level tasks:
-1. Download PDF files from academic websites
-2. Extract text content from PDFs
-3. Parse HTML pages for basic article metadata
-4. Use AI to extract comprehensive article metadata from PDF text
-5. Correct and complete missing information
-6. Generate standardized CSV files for articles, authors, and references
+1. Parse HTML pages from OJS (Milanesa) for article metadata (source of truth) and validate the configured year against DOIs
+2. Download PDF files for the same issue
+3. Extract text from PDFs only for page counts and **reference** sections (AI-assisted)
+4. Use AI to complete any remaining missing fields (field completion)
+5. Generate standardized CSV files for articles, authors, and references
 
 ## Project Structure
 
@@ -88,26 +87,23 @@ The application uses a robust configuration system:
 ### Workflow
 
 1. **Initialization**: The application reads configuration from `config.json` and sets up all components
-2. **PDF Download**: The system downloads PDF files from the specified OJS website
-3. **Text Extraction**: The PDFProcessor extracts text from the PDFs
-4. **Metadata Extraction**: Two parallel processes extract metadata:
-   - HTML parsing to get basic article information (title, section, page numbers)
-   - AI-based extraction to get detailed article data (abstracts, authors, references)
-5. **Data Merging**: Information from both sources is merged into a unified article model
-6. **Completion**: AI is used to fill in any missing fields
-7. **Affiliation Correction**: Author affiliations are standardized and translated
-8. **Output Generation**: Three CSV files are produced:
+2. **Website metadata**: OJS HTML parsing loads titles, authors, abstracts, DOIs, etc.; the configured year is checked against DOIs before any PDF download
+3. **PDF Download**: PDFs are downloaded for the same issue
+4. **Text extraction (targeted)**: PDF text is used for page counts and **references** extraction (AI); full article metadata is **not** taken from the PDF first
+5. **Completion**: AI fills in any missing fields (same field-completion step as before)
+6. **Affiliation Correction**: Author affiliations can be standardized and translated (via dedicated tools when run)
+7. **Output Generation**: Three CSV files are produced:
    - Articles.csv: Article metadata
    - Autores.csv: Author information
    - Referencias.csv: Bibliographic references
 
 ### AI Processing
 
-The system uses AI for three main tasks:
+The system uses AI for these main tasks in the default migration:
 
-1. **Article Metadata Extraction**: Extracts titles, abstracts, keywords from first pages
-2. **References Extraction**: Extracts bibliography from the last pages
-3. **Field Completion**: Fills in missing data and translates content when needed
+1. **References Extraction**: Extracts bibliography from the reference section / last pages of each PDF
+2. **Field Completion**: Fills in missing data when the website did not provide a value
+3. **Optional / legacy**: Full metadata extraction from PDF text (`extract_articles_data_from_PDF_text`) is **not** used by the main `Migrator` path anymore; it remains in the codebase for experiments or tooling
 
 ## Configuration
 
@@ -120,7 +116,7 @@ Key configuration options:
 - `engine`: The OpenAI model to use
 - `anthropic_model`: The Anthropic model to use
 - `output_dir`: Directory for output files
-- `doi_prefix`: DOI prefix for the publication
+- `doi_prefix`: (Optional) DOI prefix; if omitted, inferred from DOIs on the website
 - `pages_to_process`: Number of pages to process per PDF
 - `files_to_download`: Number of files to download (-1 for all)
 

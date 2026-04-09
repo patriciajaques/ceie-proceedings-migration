@@ -8,16 +8,17 @@ from src.services.article_extractor import ArticleExtractor
 from src.io.csv_writer import CsvWriter
 from src.logging.json_logger import JsonLogger
 from src.domain.article import Article
+from src.domain.reference import Reference
 import os
 import re
 
 
 class Migrator:
     """
-    Class responsible for migrating PDF files, processing PDFs and extracting article information.
+    Orchestrates migration: OJS website metadata first, then PDFs for pages and references.
 
-    This class coordinates the entire migration process, from downloading PDFs from a website,
-    processing their content, extracting metadata, to generating CSV files with the extracted data.
+    Website (Milanesa/OJS) is the primary source for titles, authors, abstracts, and DOIs.
+    PDF text is used for page counts and reference extraction; field completion fills gaps.
     """
 
     def __init__(
@@ -62,11 +63,19 @@ class Migrator:
         Returns:
             list: List of Article objects containing article metadata.
         """
+        # 0) Fetch website metadata early and validate year before any downloads
+        website_articles_data_list = self._get_website_articles_data(num_files)
+        self._validate_year_matches_site_or_abort(website_articles_data_list)
+
         # 1) Download all PDFs from the specified website to a directory
         self.downloader.donwload_pdf_files_from_url(num_files)
 
         # 2) Extract article information from the downloaded PDFs
-        articles_list = self.extract_metadata(num_files, num_pages)
+        articles_list = self.extract_metadata(
+            num_files,
+            num_pages,
+            website_articles_data_list=website_articles_data_list,
+        )
 
         # 3) Complete missing fields in the articles by calling the AI API
         self.complete_missing_fields(articles_list)
@@ -74,7 +83,12 @@ class Migrator:
         # 4) Return the processed metadata
         return articles_list
 
-    def extract_metadata(self, num_files=-1, num_pages=11):
+    def extract_metadata(
+        self,
+        num_files=-1,
+        num_pages=11,
+        website_articles_data_list=None,
+    ):
         """
         Extracts metadata from the PDFs and website.
 
@@ -91,21 +105,69 @@ class Migrator:
         )
 
         # 2) Extract article information from the website (usa cache se existir)
-        website_articles_data_list = self._get_website_articles_data(num_files)
+        # If provided by migrate(), reuse to avoid duplicate HTTP/cache reads.
+        if website_articles_data_list is None:
+            website_articles_data_list = self._get_website_articles_data(num_files)
+
+        # Infer DOI prefix from DOIs extracted from website metadata pages
+        extracted_dois = []
+        for website_article in website_articles_data_list or []:
+            if isinstance(website_article, dict) and website_article.get("doi"):
+                extracted_dois.append(website_article["doi"])
+        if extracted_dois:
+            self.inferred_doi_prefix = self._infer_doi_prefix(extracted_dois)
+            if self.inferred_doi_prefix:
+                print(
+                    f"Prefixo DOI inferido automaticamente a partir do site: {self.inferred_doi_prefix}"
+                )
 
         # 2.5) Extract sections from the website and generate Secoes.csv
         sections_data = self.parser.extract_sections_from_website()
         CsvWriter.write_sections_csv(self.csv_save_dir, sections_data)
 
-        # 3) Extract article information from PDF text into a list of Article objects
-        pdf_articles_list = self.extractor.extract_articles_data_from_PDF_text(
-            all_files_data
-        )
+        # 3) Build Article objects from WEBSITE metadata first (source of truth)
+        articles_list = []
+        for website_article in website_articles_data_list or []:
+            if not isinstance(website_article, dict):
+                continue
+            articles_list.append(Article.from_dict(website_article))
 
-        # 4) Merge article information extracted from the website with information from PDFs
-        articles_list = self.merge_article_info(
-            website_articles_data_list, pdf_articles_list
-        )
+        # 4) Enrich from PDFs ONLY what the website doesn't provide:
+        # - num_pages/pages
+        # - references (for non-editorials)
+        pdf_by_id = {
+            (item.get("base_filename") or "").strip(): item
+            for item in (all_files_data or [])
+            if isinstance(item, dict) and (item.get("base_filename") or "").strip()
+        }
+        for article in articles_list:
+            id_jems = getattr(article, "id_jems", "") or ""
+            pdf_item = pdf_by_id.get(str(id_jems).strip())
+            if pdf_item:
+                # Update num_pages/pages using PDF-derived numPages
+                num_pages_pdf = pdf_item.get("numPages", 0) or 0
+                try:
+                    article.num_pages = int(num_pages_pdf)
+                except Exception:
+                    article.num_pages = 0
+                article.pages = self.update_pages(
+                    article.first_page, article.num_pages
+                )
+
+                # Extract references from PDF only for non-editorials
+                if getattr(article, "section_abbrev", "") != "EDT":
+                    refs = self._extract_references_from_pdf_item(pdf_item)
+                    article.references = [
+                        Reference.from_dict(r) if isinstance(r, dict) else Reference(
+                            description=str(r), order=i
+                        )
+                        for i, r in enumerate(refs, start=1)
+                    ]
+                else:
+                    article.references = []
+
+            # Normalize or generate DOI for every article (with or without PDF)
+            self.correct_doi(article)
 
         # 5) Log article metadata before field completion (convert to dict for logging)
         articles_dict_list = [article.to_dict() for article in articles_list]
@@ -119,6 +181,112 @@ class Migrator:
         # Note: CSV files will be generated after field completion in complete_missing_fields()
 
         return articles_list
+
+    def _extract_references_from_pdf_item(self, pdf_item: dict) -> list[dict]:
+        """
+        Extract references from a processed PDF item dict (from PDFProcessor).
+
+        Uses the same strategy as other tooling:
+        - Prefer "section" (detect heading Referências/References)
+        - Fallback to "last" pages if section yields too few items
+        """
+        try:
+            section_text_raw = self.extractor.get_reference_pages_text(
+                pdf_item, strategy="section"
+            )
+            section_text = self.extractor.text_processor.clean_text(section_text_raw)
+        except Exception:
+            section_text = ""
+
+        refs_list: list[dict] = []
+        if section_text:
+            try:
+                refs_dict = self.extractor.extract_references_metadata_with_ai(
+                    section_text
+                )
+                refs_list = refs_dict.get("references") or []
+            except Exception:
+                refs_list = []
+
+        if len(refs_list) < 2:
+            try:
+                last_text_raw = self.extractor.get_reference_pages_text(
+                    pdf_item, strategy="last"
+                )
+                last_text = self.extractor.text_processor.clean_text(last_text_raw)
+                refs_dict = self.extractor.extract_references_metadata_with_ai(last_text)
+                last_refs = refs_dict.get("references") or []
+                if len(last_refs) > len(refs_list):
+                    refs_list = last_refs
+            except Exception:
+                pass
+
+        # Normalize to list[dict] only
+        normalized: list[dict] = []
+        for i, ref in enumerate(refs_list, start=1):
+            if isinstance(ref, dict):
+                ref_copy = dict(ref)
+                ref_copy.setdefault("order", i)
+                normalized.append(ref_copy)
+            elif ref:
+                normalized.append({"description": str(ref), "order": i})
+        return normalized
+
+    @staticmethod
+    def _infer_year_from_dois(dois: list[str]) -> str | None:
+        """
+        Infer the most likely year from a list of DOI strings.
+
+        Strategy: extract all 4-digit years (19xx or 20xx), then return the
+        most frequent one. Returns None if no year can be inferred.
+        """
+        if not dois:
+            return None
+
+        years: list[str] = []
+        for doi in dois:
+            if not doi:
+                continue
+            matches = re.findall(r"\b(19\d{2}|20\d{2})\b", str(doi))
+            years.extend(matches)
+
+        if not years:
+            return None
+
+        from collections import Counter
+
+        return Counter(years).most_common(1)[0][0]
+
+    def _validate_year_matches_site_or_abort(self, website_articles_data_list) -> None:
+        """
+        Abort the migration if the configured year does not match the website year.
+
+        The website year is inferred from article DOIs extracted from the Milanesa
+        metadata pages. If no DOIs or no year can be inferred, validation is skipped.
+        """
+        try:
+            config_year = str(self.year).strip()
+        except Exception:
+            config_year = ""
+
+        dois: list[str] = []
+        for item in website_articles_data_list or []:
+            doi = (item.get("doi") or "").strip() if isinstance(item, dict) else ""
+            if doi:
+                dois.append(doi)
+
+        inferred_year = self._infer_year_from_dois(dois)
+        if not inferred_year:
+            # No reliable signal to validate; do not block the run.
+            return
+
+        if config_year != inferred_year:
+            raise ValueError(
+                "Ano do config divergente do ano inferido a partir do Milanesa. "
+                f"config.year='{config_year}' | ano_inferido='{inferred_year}'. "
+                "Ajuste o campo 'year' em config/config.json ou aponte 'site_url' "
+                "para o issue correto."
+            )
 
     def _get_website_articles_data(self, num_files: int):
         """
@@ -243,94 +411,6 @@ class Migrator:
         self.write_csv_by_workshop(updated_articles)
 
         return updated_articles
-
-    def merge_article_info(self, website_articles_data_list, pdf_articles_list):
-        """
-        Merges article information from website and PDF sources.
-
-        Args:
-            website_articles_data_list (list): List of dictionaries containing article information from the website.
-            pdf_articles_list (list): List of Article objects containing article information from PDFs.
-
-        Returns:
-            list: List of Article objects with merged article information.
-        """
-        # Convert pdf_articles_list to a dictionary for O(1) access by key
-        pdf_articles_dict = {article.id_jems: article for article in pdf_articles_list}
-
-        # New list for merged articles
-        merged_articles_list = []
-
-        # First pass: collect all extracted DOIs to infer prefix if needed
-        extracted_dois = []
-        for website_article in website_articles_data_list:
-            # Check if DOI was extracted from website
-            if "doi" in website_article and website_article["doi"]:
-                extracted_dois.append(website_article["doi"])
-
-            # Check if DOI was extracted from PDF
-            idJEMS = website_article["idJEMS"]
-            if idJEMS in pdf_articles_dict:
-                pdf_article = pdf_articles_dict[idJEMS]
-                if hasattr(pdf_article, "doi") and pdf_article.doi:
-                    extracted_dois.append(pdf_article.doi)
-
-        # Infer DOI prefix from extracted DOIs
-        if extracted_dois:
-            self.inferred_doi_prefix = self._infer_doi_prefix(extracted_dois)
-            if self.inferred_doi_prefix:
-                print(
-                    f"Prefixo DOI inferido automaticamente a partir do site: {self.inferred_doi_prefix}"
-                )
-
-        # Process each item in website_articles_data_list
-        for website_article in website_articles_data_list:
-            idJEMS = website_article["idJEMS"]
-            if idJEMS in pdf_articles_dict:
-                pdf_article = pdf_articles_dict[idJEMS]
-
-                # Create a base Article from the website data
-                merged_article = Article.from_dict(website_article)
-
-                # Update with PDF article data, but preserve DOI from website if it exists
-                website_doi = (
-                    merged_article.doi if hasattr(merged_article, "doi") else None
-                )
-
-                for attr, value in pdf_article.__dict__.items():
-                    # Skip certain fields we want to keep from website (Milanesa) data
-                    if attr not in [
-                        "id_jems",
-                        "section_abbrev",
-                        "first_page",
-                        "num_pages",
-                        "doi",  # Preserve DOI from website if available
-                        "title_orig",  # Preserve title from website (Milanesa)
-                        "title_en",  # Preserve English title (to be filled later)
-                        "authors",  # Preserve authors from website (Milanesa)
-                        "keywords_orig",  # Preserve keywords from website / later completion
-                        "keywords_en",
-                    ]:
-                        # Normalize DOI if it comes from PDF
-                        if attr == "doi" and value:
-                            value = self._normalize_doi(value)
-                        setattr(merged_article, attr, value)
-
-                # Restore website DOI if it was extracted (normalize it)
-                if website_doi:
-                    merged_article.doi = self._normalize_doi(website_doi)
-
-                # Update pages field
-                merged_article.pages = self.update_pages(
-                    website_article["firstPage"], pdf_article.num_pages
-                )
-
-                # Correct/generate DOI only if not already extracted
-                self.correct_doi(merged_article)
-
-                merged_articles_list.append(merged_article)
-
-        return merged_articles_list
 
     def update_pages(self, first_page, num_pages):
         """

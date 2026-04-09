@@ -1,8 +1,7 @@
 {
-    "site_url": "http://milanesa.ime.usp.br/rbie/index.php/sbie/issue/view/180",
-    "year": "2018",
+    "site_url": "http://milanesa.ime.usp.br/rbie/index.php/sbie/issue/view/45",
+    "year": "2012",
     "output_dir": "output/",
-    "doi_prefix": "10.5753/cbie.sbie.",
     "prompts_file": "config/prompts.yaml",
     "engine": "gpt-5-nano-2025-08-07",
     "engine_description": "GPT-5 Nano (usamos GPT 5 mini anteriormente, mas o modelo nano é mais rápido e barato e apresenta resultados de qualidade semelhante)",

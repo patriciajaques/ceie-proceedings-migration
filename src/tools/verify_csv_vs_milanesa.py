@@ -333,7 +333,7 @@ def main(
 if __name__ == "__main__":
     os.system("cls" if os.name == "nt" else "clear")
     # Parâmetros: altere aqui para rodar o script
-    MAX_ARTICLES = None  # None = todos; ex.: 5 para testar só os 5 primeiros
+    MAX_ARTICLES = 5  # None = todos; ex.: 5 para testar só os 5 primeiros
     YEAR = None  # None = usa o ano do config; ex.: "2018" ou "2019"
     SIMILARITY_THRESHOLD = 0.8  # limiar para considerar resumos/abstracts semelhantes
 

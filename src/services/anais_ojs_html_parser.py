@@ -491,23 +491,14 @@ class OJSHTMLParser:
 
 if __name__ == "__main__":
     config_loader = ConfigLoader("config/config.json")
-    config = config_loader.load()
-    site_url = config["site_url"]
-    # title = config['title']
+    site_url = config_loader.get_config_value("site_url")
 
     parser = OJSHTMLParser(site_url)
-    articles_info = parser.extract_articles_info()
+    articles_info = parser.extract_articles_info_from_the_website(-1)
 
-    # print(articles_info)
-
-    # Convert the articles_info dictionary to JSON
-    articles_info_json = json.dumps(articles_info)
-
-    # Define the output file path
-    output_file = "text/articles_info.json"
-
-    # Write the JSON data to the output file
-    with open(output_file, "w") as file:
-        file.write(articles_info_json)
+    output_file = "temp/articles_info.json"
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as file:
+        file.write(json.dumps(articles_info, ensure_ascii=False, indent=2))
 
     print(f"Articles information saved to {output_file}")

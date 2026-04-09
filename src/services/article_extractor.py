@@ -1,7 +1,6 @@
 import json
 import os
-import re
-import datetime
+import unicodedata
 from typing import Dict, List, Optional
 from src.utils.text_processor import TextProcessor
 from src.domain.article import Article
@@ -69,6 +68,10 @@ class ArticleExtractor:
     ) -> List[Article]:
         """Extracts article data from PDF text.
 
+        Not used by the main Migrator flow (site-first migration builds article
+        metadata from the OJS website and uses PDF text only for references
+        and page counts). Kept for tooling or manual experiments.
+
         Usa cache incremental: artigos já extraídos são carregados do disco e pulados.
         O cache é salvo após cada artigo para permitir retomada em caso de interrupção.
         O cache não é reduzido quando se roda com menos arquivos: mantém todos os artigos
@@ -111,7 +114,16 @@ class ArticleExtractor:
         first_pages = self.extract_pages(one_article_text, page_location="first")
         first_pages = self.text_processor.clean_text(first_pages)
 
-        last_pages = self.extract_pages(one_article_text, page_location="last")
+        # Prefer section "Referências"/"References" (from end backward); else last 3 pages
+        section_pages_raw = self.get_reference_pages_text(
+            one_article_text, strategy="section"
+        )
+        if section_pages_raw:
+            last_pages = section_pages_raw
+        else:
+            last_pages = self.get_reference_pages_text(
+                one_article_text, strategy="last"
+            )
         last_pages = self.text_processor.clean_text(last_pages)
 
         # Check if we have section information
@@ -120,6 +132,26 @@ class ArticleExtractor:
         article_dict = self.extract_metadata_with_ai(
             first_pages, last_pages, section_abbrev
         )
+
+        # Fallback: if we used "last" and got few refs, try section (e.g. encoding)
+        if section_abbrev != "EDT" and not section_pages_raw:
+            refs = article_dict.get("references") or []
+            if len(refs) < 2:
+                section_pages = self.get_reference_pages_text(
+                    one_article_text, strategy="section"
+                )
+                if section_pages:
+                    section_pages = self.text_processor.clean_text(
+                        section_pages
+                    )
+                    refs_fallback = (
+                        self.extract_references_metadata_with_ai(section_pages)
+                    )
+                    refs_fallback_list = refs_fallback.get(
+                        "references", []
+                    )
+                    if len(refs_fallback_list) > len(refs):
+                        article_dict["references"] = refs_fallback_list
 
         # Update with additional information
         article_dict["num_pages"] = one_article_text["numPages"]
@@ -133,6 +165,110 @@ class ArticleExtractor:
 
         # Convert to Article object
         return Article.from_dict(article_dict)
+
+    # Headings used to detect the references section when last pages are appendices
+    REFERENCE_SECTION_HEADINGS = (
+        "referências",
+        "referencias",
+        "referência",
+        "references",
+        "bibliography",
+        "bibliografia",
+    )
+
+    # Maximum number of pages sent to the LLM for reference extraction (never exceed)
+    MAX_PAGES_FOR_REFERENCES = 5
+
+    @staticmethod
+    def _normalize_page_for_heading_match(text: str) -> str:
+        """Normalize page text so section headings are found despite encoding issues.
+
+        PDFs often have broken encoding (e.g. 'Referˆencia' instead of 'Referência').
+        Lowercase, replace common PDF glitches, then strip accents so that
+        'referências' and 'referencia' both match.
+        """
+        if not text:
+            return ""
+        t = text.lower()
+        # Common PDF encoding artifacts that replace accented letters
+        t = t.replace("\u02c6", "e")   # MODIFIER LETTER CIRCUMFLEX (e.g. Referˆencia)
+        t = t.replace("\u02da", "o")   # ring above
+        t = t.replace("\u00b4", "")   # acute accent (often before letter)
+        nfkd = unicodedata.normalize("NFKD", t)
+        return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+    def get_reference_pages_text(
+        self, one_article_text: Dict, strategy: str = "last"
+    ) -> str:
+        """Get text for reference extraction: last 3 pages or section block.
+
+        Never returns more than MAX_PAGES_FOR_REFERENCES pages of text.
+
+        Args:
+            one_article_text: Dict with "text_pages" (list of page strings).
+            strategy: "last" = last 3 pages (fallback); "section" = search
+                backward from last page for "Referências"/"References" (última,
+                penúltima, antepenúltima, etc., up to 4 pages before) and return
+                up to MAX_PAGES_FOR_REFERENCES pages from that page (fallback
+                when last pages are appendices).
+
+        Returns:
+            Concatenated page text, or empty string if strategy "section" and
+            no heading found.
+        """
+        text_pages = one_article_text.get("text_pages") or []
+        if not text_pages:
+            return ""
+        n = len(text_pages)
+        max_pages = self.MAX_PAGES_FOR_REFERENCES
+
+        if strategy == "last":
+            # Use last 3 pages so we include the start of references (antepenultimate)
+            # when refs span antepenultimate + penultimate + last; capped at max_pages
+            take = min(3, max_pages, n)
+            return "\n\n".join(text_pages[-take:])
+
+        if strategy == "section":
+            # Normalized headings for matching (PDFs often have broken encoding)
+            norm_headings = [
+                self._normalize_page_for_heading_match(h)
+                for h in self.REFERENCE_SECTION_HEADINGS
+            ]
+            # Section titles are at start of a line (e.g. "Referências" or "6. Referências");
+            # avoid matching "ID Referência" inside tables. Check first 800 chars line by line.
+            title_region_len = 800
+
+            def _page_has_section_title(pagenorm: str) -> bool:
+                region = pagenorm[:title_region_len]
+                for line in region.split("\n"):
+                    line = line.strip()
+                    # Skip empty; allow optional numbering like "6." or "7."
+                    while line and line[0:1].isdigit():
+                        line = line.lstrip("0123456789.")
+                        line = line.strip()
+                    if not line:
+                        continue
+                    for h in norm_headings:
+                        if line.startswith(h) or line == h:
+                            return True
+                return False
+
+            # Search backward: last page, then penultimate, then antepenultimate,
+            # up to 4 pages before (so 5 attempts)
+            for offset in range(min(max_pages, n)):
+                i = n - 1 - offset
+                if i < 0:
+                    break
+                page = text_pages[i]
+                if not page:
+                    continue
+                page_norm = self._normalize_page_for_heading_match(page)
+                if _page_has_section_title(page_norm):
+                    block = text_pages[i: min(i + max_pages, n)]
+                    return "\n\n".join(block)
+            return ""
+
+        return ""
 
     def extract_pages(self, one_article_text: Dict, page_location: str) -> str:
         """Extracts text from specified pages of an article.
