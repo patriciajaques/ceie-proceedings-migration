@@ -24,8 +24,9 @@ class OJSHTMLParser:
         Extracts information about the articles from the HTML file. It extracts the following information:
         - The sequential number of the article
         - The abbreviated section name
-        - The original title of the article
-        - The starting page of the article
+        - Title, authors, abstracts, DOI, and page fields from each article's
+          ``rt/metadata`` page when a PDF link exists (TOC values are fallbacks)
+        - The starting page from the TOC when metadata does not provide it
 
         Args:
             num_files_to_process (int, optional): The number of files to process.
@@ -78,27 +79,40 @@ class OJSHTMLParser:
                 else:
                     pdf_file_name = "No PDF link found"
 
-                # Store the extracted information
-                metadados = {
-                    "seq": seq_num,
-                    "sectionAbbrev": section_abbrev,
-                    "titleOrig": article_title,
-                    "firstPage": page_start,
-                    "idJEMS": pdf_file_name,  # Add the processed PDF file name here
-                }
-                print("Processando arquivo: ", metadados["idJEMS"])
+                print("Processando arquivo: ", pdf_file_name)
 
-                # Get additional metadata
-                additional_metadata = self.get_metadata(metadados_url)
-                print("Pegou metadados adicionais: do arquivo", metadados["idJEMS"])
+                # Milanesa rt/metadata page is authoritative for title, authors,
+                # abstracts, DOI, and page fields; TOC values are fallbacks only.
+                if pdf_link_element:
+                    additional_metadata = self.get_metadata(metadados_url)
+                    print(
+                        "Pegou metadados adicionais: do arquivo",
+                        pdf_file_name,
+                    )
+                else:
+                    additional_metadata = self._get_article_and_authors(
+                        {
+                            "article": article_title,
+                            "authors": [],
+                            "abstractOrig": "",
+                            "abstractEn": "",
+                            "doi": "",
+                            "pages_range": "",
+                            "first_page_cell": page_start,
+                        }
+                    )
 
-                # Add items from additional_metadata to metadados, but only if they don't already exist in metadados
-                for key, value in additional_metadata.items():
-                    if key not in metadados:
-                        metadados[key] = value
-                    else:
-                        metadados[key + str(2)] = value
-                data.append(metadados)
+                merged = dict(additional_metadata)
+                merged["seq"] = seq_num
+                merged["sectionAbbrev"] = section_abbrev
+                merged["idJEMS"] = pdf_file_name
+                if not (merged.get("titleOrig") or "").strip():
+                    merged["titleOrig"] = article_title
+                if not (merged.get("firstPage") or "").strip():
+                    merged["firstPage"] = page_start
+                if "authors" not in merged:
+                    merged["authors"] = []
+                data.append(merged)
 
                 seq_num += 1
                 next_sibling = next_sibling.find_next_sibling()
@@ -363,6 +377,84 @@ class OJSHTMLParser:
         # Replace "article/view" with "rt/metadata" in the URL
         return url.replace("article/view", "rt/metadata")
 
+    @staticmethod
+    def _metadata_table_field(soup, label_needles: tuple[str, ...]) -> str:
+        """
+        Read the value cell next to a label ``td`` on OJS rt/metadata HTML tables.
+
+        Args:
+            soup: Parsed metadata page.
+            label_needles: Substrings to match label cells (e.g. \"Páginas\").
+        """
+        for needle in label_needles:
+            needle_lower = needle.lower()
+            for td in soup.find_all("td"):
+                label_text = td.get_text(separator=" ", strip=True) or ""
+                if needle_lower in label_text.lower():
+                    sib = td.find_next_sibling("td")
+                    if sib is not None:
+                        return sib.get_text(separator=" ", strip=True)
+        return ""
+
+    @staticmethod
+    def _normalize_language_from_metadata(raw: str) -> str:
+        """
+        Map OJS metadata language labels to a 2-letter code (pt, en, es) or "".
+
+        PKP often stores full names (e.g. \"Portuguese\", \"English\") or locale
+        codes (pt_BR, en_US). Field completion expects pt/en/es elsewhere.
+        """
+        if not raw or not str(raw).strip():
+            return ""
+        s = str(raw).strip()
+        low = s.lower().replace("_", "-")
+        # Locale-style: pt-br, en-us, es-es
+        head = low.split("-")[0].strip()
+        if len(head) == 2 and head in ("pt", "en", "es"):
+            return head
+        # 3-letter ISO 639-2 common in OJS
+        if head in ("por", "pt"):
+            return "pt"
+        if head in ("eng", "en"):
+            return "en"
+        if head in ("spa", "es"):
+            return "es"
+        # Full names (EN/PT/ES UI)
+        if "portug" in low or "portugu" in low or "brazil" in low:
+            return "pt"
+        if (
+            "english" in low
+            or "inglês" in low
+            or "ingles" in low
+            or low.strip() == "en"
+            or "anglais" in low
+        ):
+            return "en"
+        if "spanish" in low or "españ" in low or "espanho" in low or "castel" in low:
+            return "es"
+        # Single word short forms sometimes seen in tables
+        if low in ("portuguese", "português", "portugues"):
+            return "pt"
+        if low in ("english", "inglês", "ingles"):
+            return "en"
+        if low in ("spanish", "espanhol", "español"):
+            return "es"
+        return ""
+
+    @staticmethod
+    def _first_page_from_pages_range(pages_range: str) -> str:
+        """Return leading page number from strings like \"1-10\" or \"12–15\"."""
+        if not pages_range or not str(pages_range).strip():
+            return ""
+        normalized = (
+            str(pages_range)
+            .strip()
+            .replace("–", "-")
+            .replace("—", "-")
+        )
+        m = re.match(r"^\s*(\d+)", normalized)
+        return m.group(1) if m else ""
+
     def get_metadata(self, metadados_url):
         metadata = {
             "article": "",
@@ -392,28 +484,46 @@ class OJSHTMLParser:
                 # Normalize DOI to store only the identifier (remove URL prefix)
                 metadata["doi"] = self._normalize_doi(doi_value)
 
-        author_tags = soup.find_all("td", string=lambda x: x and "Autor" in x)
+        # Match label cell exactly "Autor" (not "Direito autoral", etc.)
+        author_tags = soup.find_all(
+            "td",
+            string=lambda x: x is not None and x.strip() == "Autor",
+        )
         for tag in author_tags:
-            # Navegar para a célula correta que contém os dados do autor
-            # Formato esperado: "Nome; Afiliação; País" ou "Nome; Afiliação; País; E-mail"
-            info_td = tag.find_next("td")  # primeiro td após o título 'Autor'
+            # PKP table: ... | Autor | hint column | value column |
+            info_td = tag.find_next("td")
             if info_td:
                 next_td = info_td.find_next_sibling("td")
                 if next_td:
-                    author_details = next_td.text.split(";")
-                    if len(author_details) >= 3:
+                    raw = next_td.get_text(separator=" ", strip=True)
+                    parts = [p.strip() for p in raw.split(";") if p.strip()]
+                    if not parts:
+                        continue
+                    if len(parts) >= 3:
                         author = {
-                            "name": author_details[0].strip(),
-                            "authorAffiliation": author_details[1].strip(),
-                            "authorCountry": author_details[2].strip(),
+                            "name": parts[0],
+                            "authorAffiliation": parts[1],
+                            "authorCountry": parts[2],
                             "authorEmail": (
-                                author_details[3].strip()
-                                if len(author_details) >= 4
-                                and author_details[3].strip()
-                                else ""
+                                parts[3] if len(parts) >= 4 and parts[3] else ""
                             ),
                         }
-                        metadata["authors"].append(author)
+                    elif len(parts) == 2:
+                        author = {
+                            "name": parts[0],
+                            "authorAffiliation": parts[1],
+                            "authorCountry": "",
+                            "authorEmail": "",
+                        }
+                    else:
+                        # Milanesa SBIE: often only the full name in the value cell
+                        author = {
+                            "name": parts[0],
+                            "authorAffiliation": "",
+                            "authorCountry": "",
+                            "authorEmail": "",
+                        }
+                    metadata["authors"].append(author)
 
         # Fallback: procurar linhas "E-mail" / "Email" na tabela (comum em OJS)
         # e preencher por ordem (primeiro e-mail -> primeiro autor, etc.)
@@ -436,44 +546,82 @@ class OJSHTMLParser:
                 if i < len(emails_from_rows):
                     author["authorEmail"] = emails_from_rows[i]
 
-        # Encontrar Resumo e Abstract
-        description_tag = soup.find(
-            "td", string=lambda x: x and ("Resumo" in x or "Abstract" in x)
+        # Resumo / Abstract: PKP uses a row like | Descrição | Resumo | <body text>
+        # without "Resumo:" inside the body cell (Milanesa SBIE 2012). Older code only
+        # filled abstracts when those prefixes appeared in the same cell.
+        for label_td in soup.find_all("td"):
+            label = label_td.get_text(strip=True)
+            if label not in ("Resumo", "Abstract"):
+                continue
+            val_td = label_td.find_next_sibling("td")
+            if not val_td:
+                continue
+            content = val_td.get_text(separator=" ", strip=True)
+            if not content:
+                continue
+            if "Resumo:" in content and "Abstract:" in content:
+                resumo_text = (
+                    content.split("Abstract:")[0].replace("Resumo:", "").strip()
+                )
+                abstract_text = content.split("Abstract:")[1].strip()
+                metadata["abstractOrig"] = resumo_text
+                metadata["abstractEn"] = abstract_text
+            elif "Resumo:" in content:
+                metadata["abstractOrig"] = content.replace("Resumo:", "").strip()
+            elif "Abstract:" in content:
+                metadata["abstractEn"] = content.replace("Abstract:", "").strip()
+            elif label == "Resumo":
+                metadata["abstractOrig"] = content
+            elif label == "Abstract":
+                metadata["abstractEn"] = content
+
+        metadata["pages_range"] = self._metadata_table_field(
+            soup,
+            ("Páginas", "Pages", "Page range"),
         )
-        if description_tag:
-            next_td = description_tag.find_next_sibling("td")
-            if next_td:
-                content = next_td.text
-                # Processar Resumo e Abstract
-                if "Resumo:" in content and "Abstract:" in content:
-                    # Separar Resumo e Abstract se ambos estiverem presentes
-                    resumo_text = (
-                        content.split("Abstract:")[0].replace("Resumo:", "").strip()
-                    )
-                    abstract_text = content.split("Abstract:")[1].strip()
-                    metadata["abstractOrig"] = resumo_text
-                    metadata["abstractEn"] = abstract_text
-                elif "Resumo:" in content:
-                    # Apenas Resumo presente
-                    resumo_text = content.replace("Resumo:", "").strip()
-                    metadata["abstractOrig"] = resumo_text
-                elif "Abstract:" in content:
-                    # Apenas Abstract presente
-                    abstract_text = content.replace("Abstract:", "").strip()
-                    metadata["abstractEn"] = abstract_text
+        metadata["first_page_cell"] = self._metadata_table_field(
+            soup,
+            (
+                "Primeira página",
+                "First page",
+                "Starting page",
+                "First Page",
+            ),
+        )
+        lang_raw = self._metadata_table_field(
+            soup,
+            (
+                "Language",
+                "Idioma",
+                "Língua",
+                "Lingua",
+                "Submission language",
+                "Idioma da submissão",
+                "Primary language",
+                "Idioma principal",
+            ),
+        )
+        metadata["language"] = self._normalize_language_from_metadata(lang_raw)
         article = self._get_article_and_authors(metadata)
         return article
 
     def _get_article_and_authors(self, metadata):
+        pages_val = (metadata.get("pages_range") or "").strip()
+        first_page_val = (metadata.get("first_page_cell") or "").strip()
+        if not first_page_val and pages_val:
+            first_page_val = self._first_page_from_pages_range(pages_val)
+
+        lang = self._normalize_language_from_metadata(metadata.get("language") or "")
         article = {
-            "language": "",
+            "language": lang,
             "titleOrig": metadata.get("article", ""),
             "titleEn": "",
             "abstractOrig": metadata.get("abstractOrig", ""),
             "abstractEn": metadata.get("abstractEn", ""),
             "keywordsOrig": "",
             "keywordsEn": "",
-            "pages": "",
+            "firstPage": first_page_val,
+            "pages": pages_val,
             "doi": metadata.get("doi", ""),  # Preserve DOI extracted from website
         }
 

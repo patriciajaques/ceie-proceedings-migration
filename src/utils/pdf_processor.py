@@ -142,56 +142,22 @@ class PDFProcessor:
 
         return text_pages, total_pages
 
-    def process_all_pdfs(self, save_files=False, number_of_pages_to_process=1):
+    def process_pdf_at_path(
+        self,
+        pdf_path: str,
+        number_of_pages_to_process: int,
+    ) -> dict:
         """
-        Process all PDF files in the specified directory.
-
-        Args:
-            save_files (bool, optional): Indicates whether text files should be saved. Default is False.
-            number_of_pages_to_process (int, optional): The number of pages to process in each PDF. Default is 1.
-                If -1, processes all pages. Otherwise, limits to the specified number of pages.
-
-        Returns:
-            list: A list containing the data of all processed PDF files. Each item in the list is a dictionary
-                 with the following keys:
-                - 'text': The text extracted from the PDF.
-                - 'numPages': The number of pages in the file.
-                - 'base_filename': The filename without the extension.
+        Extract text from a single PDF file.
         """
-        allFilesData = []
-        for filename in os.listdir(self.directory):
-            if filename.endswith(".pdf"):
-                pdf_path = os.path.join(self.directory, filename)
-                text_pages, numPages = self.extract_text_from_each_page(pdf_path)
-
-                # Limit the number of pages to process if specified
-                original_num_pages = numPages
-                if number_of_pages_to_process != -1 and number_of_pages_to_process > 0:
-                    # Process only the first N pages
-                    text_pages = text_pages[:number_of_pages_to_process]
-                    # Update numPages to reflect the actual number of pages processed
-                    numPages = min(original_num_pages, number_of_pages_to_process)
-
-                # Separate the filename from its extension
-                base_filename = os.path.splitext(filename)[0]
-                fileData = {
-                    "text_pages": text_pages,
-                    "numPages": numPages,
-                    "base_filename": base_filename,
-                }
-                allFilesData.append(fileData)
-                if save_files:
-                    # Save the dictionary to a .json file (under output/, same root as migration)
-                    os.makedirs("output/text", exist_ok=True)
-                    with open("output/text/" + base_filename + ".json", "w") as f:
-                        json.dump(fileData, f)
-        return allFilesData
-
-
-# Example usage
-if __name__ == "__main__":
-    save_directory = "pdfs"
-    pdf_processor = PDFProcessor(save_directory)
-    allFilesText = pdf_processor.process_all_pdfs()
-
-    print(allFilesText)
+        text_pages, num_pages = self.extract_text_from_each_page(pdf_path)
+        original_num_pages = num_pages
+        if number_of_pages_to_process != -1 and number_of_pages_to_process > 0:
+            text_pages = text_pages[:number_of_pages_to_process]
+            num_pages = min(original_num_pages, number_of_pages_to_process)
+        base_filename = os.path.splitext(os.path.basename(pdf_path))[0]
+        return {
+            "text_pages": text_pages,
+            "numPages": num_pages,
+            "base_filename": base_filename,
+        }

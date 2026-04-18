@@ -1,5 +1,7 @@
+import html
 import os
 from pathlib import Path
+from typing import Any
 
 import fitz
 import pandas as pd
@@ -9,6 +11,14 @@ from src.config.config_loader import ConfigLoader
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Compact metadata column (smaller font, tight vertical rhythm).
+_META_P_STYLE = (
+    "font-size:0.82rem;line-height:1.28;margin:0.1em 0;padding:0;"
+)
+_META_DIV_NOTE_STYLE = (
+    "font-size:0.82rem;line-height:1.25;margin:0.05em 0 0.15em 0;"
+)
 
 
 def _load_latest_diverge_csv(temp_dir: Path) -> Path | None:
@@ -140,6 +150,41 @@ def _build_article_list(
     return articles
 
 
+def _emit_field_divergence_note(
+    campo_name: str,
+    div_row: Any,
+    color: str,
+) -> None:
+    """Milanesa divergence note below a field (same rules as render_field)."""
+    if div_row is None or div_row.get("status") == "OK":
+        return
+    raw_mil = div_row.get("valor_milanesa", "")
+    mil_val = "" if pd.isna(raw_mil) else str(raw_mil or "").strip()
+    status = str(div_row.get("status", "") or "").strip()
+    if status == "AUSENTE_MILANESA":
+        extra = (
+            "Artigo não encontrado no Milanesa "
+            "(idJEMS não retornado pelo parser)"
+        )
+    else:
+        if mil_val:
+            extra = f"Milanesa: {mil_val}"
+        else:
+            if campo_name in {"abstractOrig", "abstractEn"}:
+                extra = ""
+            else:
+                extra = "Valor ausente no Milanesa"
+
+    if extra:
+        st.markdown(
+            f'<p style="{_META_DIV_NOTE_STYLE}">'
+            f"<span style='color:{color}; font-size:0.88em'>"
+            f"[{status}] {html.escape(extra)}"
+            f"</span></p>",
+            unsafe_allow_html=True,
+        )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Verificação CSV vs Milanesa",
@@ -229,7 +274,11 @@ def main() -> None:
     left_col, right_col = st.columns(2)
 
     with left_col:
-        st.subheader("Metadados do artigo (CSV)")
+        st.markdown(
+            f'<h3 style="font-size:1rem;margin:0.15em 0 0.2em 0;padding:0;">'
+            f"Metadados do artigo (CSV)</h3>",
+            unsafe_allow_html=True,
+        )
 
         def render_field(
             label: str,
@@ -242,41 +291,35 @@ def main() -> None:
             color = "red" if is_div else "black"
 
             st.markdown(
-                f"<b>{label}:</b> "
-                f"<span style='color:{color}'>{value}</span>",
+                f'<p style="{_META_P_STYLE}"><b>{html.escape(label)}:</b> '
+                f"<span style='color:{color}'>{html.escape(value)}</span></p>",
                 unsafe_allow_html=True,
             )
 
-            if is_div:
-                raw_mil = div_row.get("valor_milanesa", "")
-                mil_val = "" if pd.isna(raw_mil) else str(raw_mil or "").strip()
-                status = str(div_row.get("status", "") or "").strip()
-                campo_name = field_key or label
-                if status == "AUSENTE_MILANESA":
-                    extra = "Artigo não encontrado no Milanesa (idJEMS não retornado pelo parser)"
-                else:
-                    if mil_val:
-                        extra = f"Milanesa: {mil_val}"
-                    else:
-                        # Para resumo/abstract, não exibir o texto "Valor ausente no Milanesa"
-                        if campo_name in {"abstractOrig", "abstractEn"}:
-                            extra = ""
-                        else:
-                            extra = "Valor ausente no Milanesa"
-
-                if extra:
-                    st.markdown(
-                        f"<span style='color:{color}; font-size:0.9em'>"
-                        f"[{status}] {extra}"
-                        f"</span>",
-                        unsafe_allow_html=True,
-                    )
+            if is_div and div_row is not None:
+                _emit_field_divergence_note(campo_name, div_row, color)
 
         seq_val = str(artigo.get("seq", current["seq"]) or "").strip()
-        render_field("Seq", "seq", seq_val)
-
         idjems_val = str(artigo.get("idJEMS", current["idJEMS"]) or "").strip()
-        render_field("idJEMS", "idJEMS", idjems_val)
+
+        row_seq = campos_div.get("seq")
+        row_id = campos_div.get("idJEMS")
+        is_div_seq = row_seq is not None and row_seq.get("status") != "OK"
+        is_div_id = row_id is not None and row_id.get("status") != "OK"
+        color_seq = "red" if is_div_seq else "black"
+        color_id = "red" if is_div_id else "black"
+        st.markdown(
+            f'<p style="{_META_P_STYLE}"><b>Seq:</b> '
+            f"<span style='color:{color_seq}'>{html.escape(seq_val)}</span>"
+            f' &nbsp; <b>idJEMS:</b> '
+            f"<span style='color:{color_id}'>{html.escape(idjems_val)}</span>"
+            f"</p>",
+            unsafe_allow_html=True,
+        )
+        if is_div_seq and row_seq is not None:
+            _emit_field_divergence_note("seq", row_seq, color_seq)
+        if is_div_id and row_id is not None:
+            _emit_field_divergence_note("idJEMS", row_id, color_id)
 
         title_orig = str(artigo.get("titleOrig", "") or "").strip()
         render_field("Título (pt)", "titleOrig", title_orig)
@@ -293,17 +336,15 @@ def main() -> None:
         )
         autores_color = "red" if autores_is_div else "black"
 
-        st.markdown(
-            f"<b>Autores:</b>",
-            unsafe_allow_html=True,
-        )
         if not autores_list:
             st.markdown(
-                f"<span style='color:{autores_color}'>(sem autores no CSV)</span>",
+                f'<p style="{_META_P_STYLE}"><b>Autores:</b> '
+                f"<span style='color:{autores_color}'>"
+                f"(sem autores no CSV)</span></p>",
                 unsafe_allow_html=True,
             )
         else:
-            html_authors = []
+            lines = []
             for a in autores_list:
                 name = a.get("name", "")
                 email = a.get("email", "") or "-"
@@ -315,14 +356,15 @@ def main() -> None:
                 if aff:
                     parts.append(aff)
                 text = " | ".join(parts)
-
-                block = (
-                    f"<div style='margin-bottom:0.4em;'>"
-                    f"<span style='color:{autores_color}'>{text}</span>"
-                    f"</div>"
+                lines.append(
+                    f"<span style='color:{autores_color}'>"
+                    f"{html.escape(text)}</span>"
                 )
-                html_authors.append(block)
-            st.markdown("".join(html_authors), unsafe_allow_html=True)
+            body = "<br/>".join(lines)
+            st.markdown(
+                f'<p style="{_META_P_STYLE}"><b>Autores:</b><br/>{body}</p>',
+                unsafe_allow_html=True,
+            )
 
         if autores_is_div:
             raw_mil_aut = autores_div_row.get("valor_milanesa", "")
@@ -334,9 +376,10 @@ def main() -> None:
                 else "Autores divergentes em relação ao Milanesa"
             )
             st.markdown(
-                f"<span style='color:{autores_color}; font-size:0.9em'>"
-                f"[{status_aut}] {extra_aut}"
-                f"</span>",
+                f'<p style="{_META_DIV_NOTE_STYLE}">'
+                f"<span style='color:{autores_color}; font-size:0.88em'>"
+                f"[{html.escape(status_aut)}] {html.escape(extra_aut)}"
+                f"</span></p>",
                 unsafe_allow_html=True,
             )
 

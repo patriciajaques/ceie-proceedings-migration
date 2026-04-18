@@ -1,10 +1,58 @@
 import json
+import re
 import unicodedata
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
 from src.utils.text_processor import TextProcessor
-from src.domain.article import Article
+from src.utils.section_abbrev import is_editorial_section_abbrev
+from src.domain.article import Article, normalize_keywords_field
 from src.adapters.ai_client_interface import AIClientInterface
 from src.logging.json_logger import JsonLogger
+
+# Reminder when appending PDF text to field-completion instructions (system prompt
+# in prompts.yaml already describes full proceedings layout).
+_PDF_FIELD_COMPLETION_STRUCTURE_HINT = (
+    "Estrutura típica do excerto: título → autores → afiliações e e-mails → "
+    "Resumo e/ou Abstract → depois secções numeradas (ex.: 1. Introdução), "
+    "palavras-chave e rodapé dos anais (Anais do..., ISSN). "
+    "Copie em abstractOrig/abstractEn somente o texto do Resumo ou do Abstract; "
+    "não inclua autores, afiliações, corpo do artigo, introdução numerada, "
+    "palavras-chave nem rodapé.\n\n"
+)
+
+# Keys sent to field-completion LLM (no references — avoids huge JSON and parse errors).
+_FIELD_COMPLETION_LLM_PAYLOAD_KEYS: Tuple[str, ...] = (
+    "idJEMS",
+    "id_jems",
+    "seq",
+    "sectionAbbrev",
+    "titleOrig",
+    "titleEn",
+    "abstractOrig",
+    "abstractEn",
+    "keywordsOrig",
+    "keywordsEn",
+    "language",
+    "firstPage",
+    "pages",
+    "doi",
+    "numPages",
+    "authors",
+)
+
+# Expected JSON keys in the model reply (references omitted on purpose).
+_FIELD_COMPLETION_RESPONSE_KEYS_HINT = (
+    "Responda APENAS com um objeto JSON contendo estas chaves (omitir chaves que "
+    "não alterar, exceto as que o enunciado pede para preencher): idJEMS, seq, "
+    "sectionAbbrev, titleOrig, titleEn, abstractOrig, abstractEn, keywordsOrig, "
+    "keywordsEn, language, firstPage, pages, doi, numPages, authors. "
+    "NÃO inclua a chave \"references\". Use carateres UTF-8 literais nas strings "
+    "(acentos normais); NÃO use escapes \\uXXXX. "
+    "Se incluir \"authors\", repita os mesmos dados da entrada sem alterar nomes."
+)
+
+# Re-run field-completion LLM when metadata is still incomplete after merge (max per article).
+_FIELD_COMPLETION_MAX_LLM_ATTEMPTS = 3
 
 
 class ArticleExtractor:
@@ -16,7 +64,6 @@ class ArticleExtractor:
 
     def __init__(
         self,
-        article_ai_client: AIClientInterface,
         references_ai_client: AIClientInterface,
         field_completion_ai_client: AIClientInterface,
         text_processor: Optional[TextProcessor] = None,
@@ -24,13 +71,11 @@ class ArticleExtractor:
         """Initializes the article extractor.
 
         Args:
-            article_ai_client (AIClientInterface): AI client for article metadata extraction.
             references_ai_client (AIClientInterface): AI client for reference extraction.
             field_completion_ai_client (AIClientInterface): AI client for completing missing fields.
             text_processor (TextProcessor, optional): Text processor for cleaning text.
                 If not provided, a new one will be created.
         """
-        self.article_ai_client = article_ai_client
         self.references_ai_client = references_ai_client
         self.field_completion_ai_client = field_completion_ai_client
         self.text_processor = text_processor or TextProcessor()
@@ -49,6 +94,19 @@ class ArticleExtractor:
     MAX_PAGES_FOR_REFERENCES = 5
 
     @staticmethod
+    def _field_completion_llm_payload(article_dict: Dict) -> Dict:
+        """
+        Subset of article metadata for field-completion LLM: no references list.
+
+        Keeps authors for context; merge always restores authors from prior.
+        """
+        return {
+            k: article_dict[k]
+            for k in _FIELD_COMPLETION_LLM_PAYLOAD_KEYS
+            if k in article_dict
+        }
+
+    @staticmethod
     def _normalize_page_for_heading_match(text: str) -> str:
         """Normalize page text so section headings are found despite encoding issues.
 
@@ -60,9 +118,9 @@ class ArticleExtractor:
             return ""
         t = text.lower()
         # Common PDF encoding artifacts that replace accented letters
-        t = t.replace("\u02c6", "e")   # MODIFIER LETTER CIRCUMFLEX (e.g. Referˆencia)
-        t = t.replace("\u02da", "o")   # ring above
-        t = t.replace("\u00b4", "")   # acute accent (often before letter)
+        t = t.replace("\u02c6", "e")  # MODIFIER LETTER CIRCUMFLEX (e.g. Referˆencia)
+        t = t.replace("\u02da", "o")  # ring above
+        t = t.replace("\u00b4", "")  # acute accent (often before letter)
         nfkd = unicodedata.normalize("NFKD", t)
         return "".join(c for c in nfkd if not unicodedata.combining(c))
 
@@ -133,7 +191,7 @@ class ArticleExtractor:
                     continue
                 page_norm = self._normalize_page_for_heading_match(page)
                 if _page_has_section_title(page_norm):
-                    block = text_pages[i: min(i + max_pages, n)]
+                    block = text_pages[i : min(i + max_pages, n)]
                     return "\n\n".join(block)
             return ""
 
@@ -205,11 +263,413 @@ class ArticleExtractor:
         """
         return self.extract_info_with_ai(self.references_ai_client, last_pages)
 
+    @staticmethod
+    def _nonempty_metadata_text(value: object) -> bool:
+        """
+        True if a metadata field counts as filled (cache/JSON may use str or list).
+        """
+        if value is None:
+            return False
+        if isinstance(value, list):
+            return any(str(x).strip() for x in value if x is not None)
+        if isinstance(value, dict):
+            return False
+        return bool(str(value).strip())
+
     def _needs_pdf_text_for_completion(self, article_dict: Dict) -> bool:
         """Verifica se o artigo não tem resumo/abstract e se a IA precisaria do texto do PDF."""
-        abstract_orig = (article_dict.get("abstractOrig") or "").strip()
-        abstract_en = (article_dict.get("abstractEn") or "").strip()
-        return not abstract_orig and not abstract_en
+        abstract_orig = article_dict.get("abstractOrig")
+        abstract_en = article_dict.get("abstractEn")
+        return not self._nonempty_metadata_text(
+            abstract_orig
+        ) and not self._nonempty_metadata_text(abstract_en)
+
+    def _needs_pdf_text_for_missing_abstract_en_only(self, article_dict: Dict) -> bool:
+        """
+        True when the site provided a Portuguese abstract but English is empty.
+
+        In that case the PDF often still contains an English Abstract section; the
+        LLM should prefer extracting it before translating abstractOrig.
+        """
+        abstract_orig = article_dict.get("abstractOrig")
+        abstract_en = article_dict.get("abstractEn")
+        return self._nonempty_metadata_text(
+            abstract_orig
+        ) and not self._nonempty_metadata_text(abstract_en)
+
+    @staticmethod
+    def _pdf_snippet_prioritize_english_abstract(
+        pdf_text: str, max_total: int = 22000
+    ) -> str:
+        """
+        Prefer a window around the English Abstract heading so it is not lost
+        when a fixed head truncation omits that section.
+        """
+        t = (pdf_text or "").strip()
+        if not t:
+            return ""
+        if len(t) <= max_total:
+            return t
+        m = re.search(r"(?im)(?:^|\n)\s*Abstract\s*[\.:\s\-]?", t)
+        if not m:
+            m = re.search(r"(?im)\bAbstract\b", t)
+        if m:
+            start = max(0, m.start() - 800)
+            return t[start : start + max_total]
+        return t[:max_total]
+
+    def metadata_text_fields_complete(self, article_dict: Dict) -> bool:
+        """
+        True when title/abstract/keywords/language are filled enough to skip
+        field-completion LLM and reuse ``articles_metadata_apos`` cache.
+
+        Ignores structural fields (pages, doi, firstPage, numPages, etc.): those
+        may be empty without invalidating a previously completed record.
+        """
+        d = article_dict
+        nmt = self._nonempty_metadata_text
+        sec = d.get("sectionAbbrev") or d.get("section_abbrev") or ""
+        if is_editorial_section_abbrev(sec):
+            return bool(
+                nmt(d.get("titleOrig"))
+                and nmt(d.get("titleEn"))
+                and nmt(d.get("language"))
+            )
+        required = (
+            "titleOrig",
+            "titleEn",
+            "abstractOrig",
+            "abstractEn",
+            "keywordsOrig",
+            "keywordsEn",
+            "language",
+        )
+        return all(nmt(d.get(k)) for k in required)
+
+    # Words / patterns typical of Portuguese proceedings titles without accents
+    # (e.g. "Capa dos Anais", "Contra-capa") so they are not mistaken for English.
+    _PT_TITLE_TOKENS: frozenset[str] = frozenset(
+        {
+            "anais",
+            "apresentacao",
+            "apresentação",
+            "capa",
+            "comites",
+            "comitês",
+            "comunicacao",
+            "comunicação",
+            "das",
+            "dos",
+            "edicao",
+            "edição",
+            "prefacio",
+            "prefácio",
+            "sumario",
+            "sumário",
+        }
+    )
+
+    @staticmethod
+    def _title_likely_portuguese_without_accents(title: str) -> bool:
+        """
+        True when the title is probably Portuguese but uses only ASCII letters
+        (no accented chars). Those titles must not be treated as English by
+        :meth:`_title_looks_english`, or ``titleEn`` would be skipped.
+        """
+        if not (title or "").strip():
+            return False
+        normalized = title.lower().replace("-", " ")
+        tokens = re.findall(r"[a-záàâãéêíóôõúç]+", normalized)
+        if any(t in ArticleExtractor._PT_TITLE_TOKENS for t in tokens):
+            return True
+        if "contra" in tokens and "capa" in tokens:
+            return True
+        return False
+
+    @staticmethod
+    def _title_looks_english(title: str) -> bool:
+        """
+        Heuristic: editorial titles already in English need no translation.
+
+        Portuguese (accented or common unaccented words) implies not English-only.
+        """
+        if not (title or "").strip():
+            return False
+        if ArticleExtractor._title_likely_portuguese_without_accents(title):
+            return False
+        if any(c in title for c in "áàâãéêíóôõúçÁÀÂÃÉÊÍÓÔÕÚÇñÑ¿¡"):
+            return False
+        letters = [c for c in title if c.isalpha()]
+        if not letters:
+            return False
+        ascii_letters = sum(1 for c in letters if c.isascii())
+        if ascii_letters / len(letters) < 0.9:
+            return False
+        # Reject if it looks like a page range or header line
+        if re.fullmatch(r"[\d\s\-–—]+", title.strip()):
+            return False
+        return True
+
+    def _field_complete_editorial(self, article_dict: Dict) -> Dict:
+        """
+        Editorials were excluded from generic field completion; fill titleEn and
+        language without PDF context (avoids page numbers mistaken for titles).
+
+        Abstracts and keywords are cleared — not expected for this document type.
+        """
+        out = dict(article_dict)
+        title_orig = (out.get("titleOrig") or "").strip()
+        title_en = (out.get("titleEn") or "").strip()
+        language = (out.get("language") or "").strip().lower()
+
+        if title_orig and title_en and language[:2] in ("pt", "en", "es"):
+            for k in ("abstractOrig", "abstractEn", "keywordsOrig", "keywordsEn"):
+                out[k] = ""
+            return out
+
+        need_title_en = not title_en
+        need_language = not language or language[:2] not in ("pt", "en", "es")
+
+        if title_orig and need_title_en and self._title_looks_english(title_orig):
+            out["titleEn"] = title_orig
+            out["language"] = "en"
+        elif title_orig and need_title_en:
+            minimal = {
+                "titleOrig": title_orig,
+                "titleEn": "",
+                "language": "pt",
+            }
+            instruction = (
+                json.dumps(minimal, ensure_ascii=False)
+                + "\n\nThis metadata row is an EDITORIAL (not a full research paper). "
+                "Return ONLY one JSON object with exactly these string keys: "
+                "titleOrig, titleEn, language. "
+                "Keep titleOrig exactly as given. "
+                "Set titleEn to a faithful English translation of titleOrig; "
+                "if titleOrig is already English, set titleEn to the same text. "
+                "Never put page numbers, page ranges, or journal headers in titleEn. "
+                'Set language to "en", "pt", or "es" matching the primary '
+                "language of titleOrig."
+            )
+            new_d = self.extract_info_with_ai(
+                self.field_completion_ai_client, instruction
+            )
+            if new_d and isinstance(new_d, dict):
+                te = (new_d.get("titleEn") or "").strip()
+                if te:
+                    out["titleEn"] = te
+                lang = (new_d.get("language") or "").strip().lower()
+                if lang[:2] in ("pt", "en", "es"):
+                    out["language"] = lang[:2]
+        elif title_orig and need_language:
+            out["language"] = "en" if self._title_looks_english(title_orig) else "pt"
+
+        lang_after = (out.get("language") or "").strip().lower()
+        if title_orig and (not lang_after or lang_after[:2] not in ("pt", "en", "es")):
+            out["language"] = "en" if self._title_looks_english(title_orig) else "pt"
+
+        for k in ("abstractOrig", "abstractEn", "keywordsOrig", "keywordsEn"):
+            out[k] = ""
+        return out
+
+    @staticmethod
+    def _normalize_abstract_from_llm(text: str, role: str) -> str:
+        """
+        Trim LLM-filled abstract fields: drop section labels and tail pasted from PDF.
+
+        ``role`` is \"en\" (abstractEn) or \"orig\" (abstractOrig). Cuts introduction
+        headings even when glued to the abstract on the same line (e.g. ``...end. 1.
+        Introdução``).
+        """
+        t = (text or "").strip()
+        if not t:
+            return ""
+
+        def _cut_at(pattern: str, s: str) -> str:
+            m = re.search(pattern, s)
+            return s[: m.start()].strip() if m else s
+
+        if role == "en":
+            t = re.sub(r"(?i)^abstract\s*[.:–—\-]?\s*", "", t, count=1)
+            lines = t.split("\n")
+            if lines and re.match(
+                r"(?i)^abstract\s*[.:–—\-]?\s*$", lines[0].strip()
+            ):
+                t = "\n".join(lines[1:]).strip()
+            t = _cut_at(r"(?i)\bResumo\s*[.:]", t)
+        else:
+            t = re.sub(r"(?i)^resumo\s*[.:–—\-]?\s*", "", t, count=1)
+            lines = t.split("\n")
+            if lines and re.match(
+                r"(?i)^resumo\s*[.:–—\-]?\s*$", lines[0].strip()
+            ):
+                t = "\n".join(lines[1:]).strip()
+            t = _cut_at(r"(?im)(?:^|\n)\s*abstract\s*[\.:\s\-]?", t)
+
+        t = _cut_at(
+            r"(?i)(?:^|\n)\s*(?:\d+\s*[.)]\s*)?(?:Introdução|Introduction)\b",
+            t,
+        )
+        t = _cut_at(
+            r"(?i)(?<=[.!?])\s+(?:\d+\s*[.)]\s*)(?:Introdução|Introduction)\b",
+            t,
+        )
+        t = _cut_at(
+            r"(?i)(?:^|\n)\s*(?:Palavras[\s-]*chave|Keywords?|Key\s+words)\b",
+            t,
+        )
+        t = _cut_at(
+            r"(?i)(?<=[.!?])\s+(?:Palavras[\s-]*chave|Keywords?|Key\s+words)\b",
+            t,
+        )
+        t = _cut_at(r"(?i)(?:^|\n)\s*Anais do\b", t)
+        t = _cut_at(r"(?i)(?<=[.!?])\s+Anais do\b", t)
+        t = _cut_at(r"\n_{4,}", t)
+        t = _cut_at(r"\n={5,}", t)
+        return t.strip()
+
+    @staticmethod
+    def _merge_field_completion_dict(prior: Dict, llm: Dict) -> Dict:
+        """
+        Overlay LLM JSON on the dict built before field completion.
+
+        Title, authors, pagination, references, and a valid ``language`` from the
+        site must stay as loaded from the Milanesa site (TOC + rt/metadata) and
+        enrich; the LLM only fills gaps like titleEn and abstracts when the site
+        did not provide them.
+
+        Keys used only for LLM self-explanation (e.g. ``fieldFailureReasons`` from
+        prompts.yaml) are dropped here so they never reach ``Article`` or saved JSON;
+        the raw model response remains in ``ai_calls.log.jsonl``.
+        """
+        llm = dict(llm)
+        llm.pop("fieldFailureReasons", None)
+        out = {**prior, **llm}
+        _from_site_and_enrich = (
+            "titleOrig",
+            "authors",
+            "firstPage",
+            "pages",
+            "numPages",
+            "references",
+            "doi",
+            "idJEMS",
+            "seq",
+            "sectionAbbrev",
+        )
+        for key in _from_site_and_enrich:
+            if key in prior:
+                out[key] = prior[key]
+        # Website language (OJS metadata) wins when valid; LLM fills gaps only.
+        prior_lang = (prior.get("language") or "").strip().lower()
+        if prior_lang[:2] in ("pt", "en", "es"):
+            out["language"] = prior_lang[:2]
+        # Do not wipe filled text fields when the model returns empty strings.
+        for key in (
+            "abstractOrig",
+            "abstractEn",
+            "keywordsOrig",
+            "keywordsEn",
+            "titleEn",
+        ):
+            llm_val = llm.get(key)
+            prior_val = prior.get(key)
+            if (
+                llm_val is not None
+                and str(llm_val).strip() == ""
+                and str(prior_val or "").strip()
+            ):
+                out[key] = prior_val
+        ao_merge = out.get("abstractOrig")
+        if ao_merge is not None and str(ao_merge).strip():
+            out["abstractOrig"] = ArticleExtractor._normalize_abstract_from_llm(
+                str(ao_merge), "orig"
+            )
+        ae = out.get("abstractEn")
+        if ae is not None and str(ae).strip():
+            out["abstractEn"] = ArticleExtractor._normalize_abstract_from_llm(
+                str(ae), "en"
+            )
+        for _kw in ("keywordsOrig", "keywordsEn"):
+            if _kw in out:
+                out[_kw] = normalize_keywords_field(out.get(_kw))
+        return out
+
+    def _build_field_completion_instruction(
+        self,
+        article_dict_for_payload: Dict,
+        id_jems: str,
+        pdf_raw_by_id: Dict[str, str],
+    ) -> str:
+        """
+        Build the user instruction for one field-completion LLM call.
+
+        ``article_dict_for_payload`` is the current metadata shown to the model
+        (after prior merges on retry); site/enrich merge still uses the original
+        dict passed to :meth:`_merge_field_completion_dict`.
+        """
+        llm_payload = self._field_completion_llm_payload(article_dict_for_payload)
+        instruction = json.dumps(llm_payload, ensure_ascii=False)
+        if self._needs_pdf_text_for_completion(
+            llm_payload
+        ) and pdf_raw_by_id.get(id_jems):
+            raw_text = pdf_raw_by_id[id_jems]
+            pdf_text = self.text_processor.clean_text(raw_text)
+            pdf_snippet = self._pdf_snippet_prioritize_english_abstract(pdf_text)
+            instruction = (
+                instruction
+                + "\n\n[Os campos de resumo (abstractOrig, abstractEn) estão vazios. "
+                "Use o texto das primeiras páginas do artigo abaixo para extrair ou redigir "
+                "um resumo em português e em inglês e, a partir dele, preencher as palavras-chave "
+                "(keywordsOrig e keywordsEn).]\n\n"
+                + _PDF_FIELD_COMPLETION_STRUCTURE_HINT
+                + "--- Texto das primeiras páginas do artigo ---\n\n"
+                + pdf_snippet
+                + "\n\n--- Fim do texto ---\n\n"
+                "IMPORTANTE: "
+                + _FIELD_COMPLETION_RESPONSE_KEYS_HINT
+                + " Sua resposta deve ser EXCLUSIVAMENTE esse JSON, sem texto do artigo "
+                "nem explicações antes ou depois."
+            )
+            print(
+                "  (incluído texto do PDF para extração de resumo e palavras-chave)",
+                flush=True,
+            )
+        elif self._needs_pdf_text_for_missing_abstract_en_only(
+            llm_payload
+        ) and pdf_raw_by_id.get(id_jems):
+            raw_text = pdf_raw_by_id[id_jems]
+            pdf_text = self.text_processor.clean_text(raw_text)
+            pdf_snippet = self._pdf_snippet_prioritize_english_abstract(pdf_text)
+            instruction = (
+                instruction
+                + "\n\n[O campo abstractEn está vazio, mas abstractOrig já contém o resumo "
+                "em português (metadado do site). PRIORIDADE: no trecho abaixo, copie "
+                "literalmente o texto da secção em inglês (Abstract / ABSTRACT), sem "
+                "traduzir o resumo em português. Só se não existir nenhuma secção em "
+                "inglês nesse trecho, traduza abstractOrig para inglês em abstractEn. "
+                "Não altere abstractOrig. Preencha os demais campos ainda vazios.]\n\n"
+                + _PDF_FIELD_COMPLETION_STRUCTURE_HINT
+                + "--- Texto das primeiras páginas do artigo ---\n\n"
+                + pdf_snippet
+                + "\n\n--- Fim do texto ---\n\n"
+                "IMPORTANTE: "
+                + _FIELD_COMPLETION_RESPONSE_KEYS_HINT
+                + " Sua resposta deve ser EXCLUSIVAMENTE esse JSON, sem texto do artigo "
+                "nem explicações antes ou depois."
+            )
+            print(
+                "  (incluído texto do PDF para abstract em inglês ou tradução do resumo)",
+                flush=True,
+            )
+        else:
+            instruction = (
+                instruction
+                + "\n\n"
+                + _FIELD_COMPLETION_RESPONSE_KEYS_HINT
+                + " Retorne APENAS esse JSON, sem texto antes ou depois."
+            )
+        return instruction
 
     def do_field_completion_of_missing_values_in_dic(
         self,
@@ -225,6 +685,15 @@ class ArticleExtractor:
         Quando o artigo não tem resumo (abstractOrig/abstractEn), e há texto bruto do PDF
         em pdf_raw_by_id, chama clean_text apenas para esse artigo e envia à IA para
         extrair resumo e palavras-chave (mesmo padrão da fase 1: corrige só quando vai usar).
+
+        Quando só há resumo em PT no site (abstractOrig preenchido, abstractEn vazio) e há
+        PDF em pdf_raw_by_id, o texto das primeiras páginas é incluído para a IA obter o
+        abstract em inglês do próprio PDF quando existir; caso contrário, traduzir abstractOrig.
+
+        Se após o merge ainda faltarem campos de texto obrigatórios, a mesma rotina de
+        field completion é repetida até _FIELD_COMPLETION_MAX_LLM_ATTEMPTS vezes,
+        usando o dicionário fundido como base do JSON enviado à IA (o merge continua a
+        ancorar títulos/autores/referências no dicionário original do site).
 
         Args:
             articles_list (list): List of Article objects with metadata.
@@ -244,21 +713,22 @@ class ArticleExtractor:
             id_jems = article.id_jems or article.to_dict().get("idJEMS", "")
             if id_jems in completion_cache:
                 cached_dict = completion_cache[id_jems]
-                # Só reutiliza o cache se o registro já estiver completo.
-                # Se ainda tiver campos vazios, deixa cair no fluxo normal
-                # para tentar novamente chamar a IA em execuções futuras.
-                if not self.has_empty_fields(cached_dict):
+                # Reuse apos JSON only when text metadata is complete (not "any key empty").
+                if self.metadata_text_fields_complete(cached_dict):
                     updated_articles.append(Article.from_dict(cached_dict))
                     continue
 
             # Convert to dictionary for AI compatibility
             article_dict = article.to_dict()
 
+            if is_editorial_section_abbrev(article_dict.get("sectionAbbrev")):
+                merged = self._field_complete_editorial(article_dict)
+                updated_articles.append(Article.from_dict(merged))
+                continue
+
             if (
-                (article_dict.get("titleOrig") or article_dict.get("titleEn"))
-                and article_dict.get("sectionAbbrev") != "EDT"
-                and self.has_empty_fields(article_dict)
-            ):
+                article_dict.get("titleOrig") or article_dict.get("titleEn")
+            ) and not self.metadata_text_fields_complete(article_dict):
 
                 print(
                     f"Improving article record with seq "
@@ -267,44 +737,35 @@ class ArticleExtractor:
                     flush=True,
                 )
 
-                # Remove fields that don't need to be sent to AI
-                clean_dict = article_dict.copy()
-                clean_dict.pop("firstPages", None)
-                clean_dict.pop("lastPages", None)
+                merged: Optional[Dict] = None
+                prior_site = article_dict
 
-                instruction = json.dumps(clean_dict)
-                if self._needs_pdf_text_for_completion(clean_dict) and pdf_raw_by_id.get(id_jems):
-                    # clean_text só para este artigo (igual à fase 1: corrige quando vai usar)
-                    raw_text = pdf_raw_by_id[id_jems]
-                    pdf_text = self.text_processor.clean_text(raw_text)
-                    instruction = (
-                        instruction
-                        + "\n\n[Os campos de resumo (abstractOrig, abstractEn) estão vazios. "
-                        "Use o texto das primeiras páginas do artigo abaixo para extrair ou redigir "
-                        "um resumo em português e em inglês e, a partir dele, preencher as palavras-chave "
-                        "(keywordsOrig e keywordsEn).]\n\n--- Texto das primeiras páginas do artigo ---\n\n"
-                        + (pdf_text[:15000] if len(pdf_text) > 15000 else pdf_text)
-                        + "\n\n--- Fim do texto ---\n\n"
-                        "IMPORTANTE: Sua resposta deve ser EXCLUSIVAMENTE o dicionário JSON completo "
-                        "(com todas as chaves: seq, titleOrig, titleEn, abstractOrig, abstractEn, keywordsOrig, "
-                        "keywordsEn, etc.). Não inclua texto do artigo nem explicações antes ou depois do JSON."
+                for attempt in range(_FIELD_COMPLETION_MAX_LLM_ATTEMPTS):
+                    base = merged if merged is not None else prior_site
+                    if self.metadata_text_fields_complete(base):
+                        break
+
+                    if attempt > 0:
+                        print(
+                            f"  (field completion: nova tentativa {attempt + 1}/"
+                            f"{_FIELD_COMPLETION_MAX_LLM_ATTEMPTS} — ainda há campos "
+                            "de texto obrigatórios vazios)",
+                            flush=True,
+                        )
+
+                    instruction = self._build_field_completion_instruction(
+                        base, id_jems, pdf_raw_by_id
                     )
-                    print("  (incluído texto do PDF para extração de resumo e palavras-chave)", flush=True)
-                else:
-                    instruction = (
-                        instruction
-                        + "\n\nRetorne APENAS o dicionário JSON completo com os campos preenchidos, "
-                        "sem nenhum texto antes ou depois."
+                    new_dict = self.extract_info_with_ai(
+                        self.field_completion_ai_client, instruction
                     )
+                    if new_dict and isinstance(new_dict, dict):
+                        merged = self._merge_field_completion_dict(
+                            prior_site, new_dict
+                        )
 
-                new_dict = self.extract_info_with_ai(
-                    self.field_completion_ai_client, instruction
-                )
-
-                if new_dict and isinstance(new_dict, dict):
-                    # Convert the updated dictionary back to an Article object
-                    updated_article = Article.from_dict(new_dict)
-                    updated_articles.append(updated_article)
+                if merged is not None:
+                    updated_articles.append(Article.from_dict(merged))
                 else:
                     updated_articles.append(article)
             else:
@@ -313,23 +774,8 @@ class ArticleExtractor:
         return updated_articles
 
     def has_empty_fields(self, dictionary: Dict) -> bool:
-        """Checks if the dictionary has empty fields.
-
-        Args:
-            dictionary (dict): Dictionary to check.
-
-        Returns:
-            bool: True if there are empty fields, False otherwise.
-        """
-        for key, value in dictionary.items():
-            # Ignore specific fields and empty lists (which may be valid)
-            if (
-                key not in ["firstPages", "lastPages", "references"]
-                and not value
-                and value != 0
-            ):
-                return True
-        return False
+        """True when text metadata still needs field completion (inverse of complete)."""
+        return not self.metadata_text_fields_complete(dictionary)
 
     def extract_info_with_ai(
         self, ai_client: AIClientInterface, instruction: str, recursion_count: int = 0
@@ -368,7 +814,10 @@ class ArticleExtractor:
                     ai_client, instruction, recursion_count + 1
                 )
 
-            print("**** Failed after 3 attempts. Returning empty dictionary. ****", flush=True)
+            print(
+                "**** Failed after 3 attempts. Returning empty dictionary. ****",
+                flush=True,
+            )
             return {}
 
     def _log_ai_call(
@@ -378,7 +827,7 @@ class ArticleExtractor:
         Registra em arquivo o prompt enviado à IA e a resposta bruta recebida.
 
         Inclui o campo "step" com o prompt_key do cliente (ex.: field_completion,
-        article_extraction) para identificar a etapa no log e no LangSmith.
+        references_extraction) para identificar a etapa no log e no LangSmith.
         """
         step = getattr(ai_client, "prompt_key", "unknown")
         system_message = getattr(ai_client, "system_message", None)

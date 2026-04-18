@@ -10,6 +10,7 @@ from src.domain.article import Article
 from src.domain.reference import Reference
 from src.io.csv_writer import CsvWriter
 from src.logging.json_logger import JsonLogger
+from src.utils.section_abbrev import is_editorial_section_abbrev
 
 from .state import MigrationState
 
@@ -155,7 +156,7 @@ def node_skip_completed_articles(state: MigrationState, migrator) -> MigrationSt
         if (
             aid
             and cached is not None
-            and not extractor.has_empty_fields(cached)
+            and extractor.metadata_text_fields_complete(cached)
         ):
             skipped.append(
                 {
@@ -198,28 +199,20 @@ def route_after_skip_articles(state: MigrationState | dict) -> str:
 
 def node_enrich_prepare(state: MigrationState, migrator) -> MigrationState:
     """
-    Load all PDFs once and attach lookup tables on the migrator for per-article workers.
+    Load references cache and reset per-batch PDF extract cache (filled in enrich).
     """
     s = MigrationState.model_validate(state)
     n_pending = len(s.articles_dict_list or [])
     _stage(
-        "Enriquecimento: extrair texto dos PDFs (pode demorar) e preparar cache "
-        f"de referências — {n_pending} artigo(s) em paralelo a seguir"
+        "Enriquecimento: cache de referências carregado; cada PDF será lido ao tratar "
+        f"o artigo ({n_pending} no lote)"
     )
-    all_files_data = migrator.processor.process_all_pdfs(
-        save_files=False, number_of_pages_to_process=s.pages_to_process
-    )
-    pdf_by_id = {
-        (item.get("base_filename") or "").strip(): item
-        for item in (all_files_data or [])
-        if isinstance(item, dict) and (item.get("base_filename") or "").strip()
-    }
-    migrator._enrich_pdf_by_id = pdf_by_id
-    migrator._enrich_pdf_files_data = all_files_data
     migrator._refs_cache = _load_references_cache(s)
-    n_pdf = len(pdf_by_id)
+    with migrator._pdf_item_cache_lock:
+        migrator._pdf_item_cache.clear()
+    migrator._enrich_pdf_files_data = None
     print(
-        f"    PDFs indexados para enriquecimento: {n_pdf} ficheiro(s).",
+        "    Pronto para enriquecer: um PDF de cada vez conforme idJEMS.",
         flush=True,
     )
     return s
@@ -267,8 +260,22 @@ def node_enrich_one_article(
         f"    [enriquecimento] Artigo idJEMS={id_jems} (ordem na edição: {order})…",
         flush=True,
     )
-    pdf_by_id = getattr(migrator, "_enrich_pdf_by_id", {}) or {}
-    pdf_item = pdf_by_id.get(str(id_jems).strip())
+    jid = str(id_jems).strip()
+    pdf_item = None
+    if jid:
+        pdf_path = Path(s.pdf_save_dir) / f"{jid}.pdf"
+        if pdf_path.is_file():
+            print(f"    A extrair texto do PDF {pdf_path.name} …", flush=True)
+            pdf_item = migrator.processor.process_pdf_at_path(
+                str(pdf_path), s.pages_to_process
+            )
+            with migrator._pdf_item_cache_lock:
+                migrator._pdf_item_cache[jid] = pdf_item
+        else:
+            print(
+                f"    Aviso: PDF em falta para idJEMS={jid} ({pdf_path.name}).",
+                flush=True,
+            )
     refs_cache = getattr(migrator, "_refs_cache", {}) or {}
 
     chunk: dict[str, Any] = {
@@ -282,9 +289,13 @@ def node_enrich_one_article(
             article.num_pages = int(num_pages_pdf)
         except Exception:
             article.num_pages = 0
-        article.pages = migrator.update_pages(article.first_page, article.num_pages)
+        web_pages = (getattr(article, "pages", None) or "").strip()
+        if not web_pages:
+            article.pages = migrator.update_pages(
+                article.first_page, article.num_pages
+            )
 
-        if getattr(article, "section_abbrev", "") != "EDT":
+        if not is_editorial_section_abbrev(getattr(article, "section_abbrev", "")):
             cache_key = str(id_jems).strip()
             cached_refs = refs_cache.get(cache_key)
             if cached_refs is None:
@@ -316,12 +327,16 @@ def node_enrich_one_article(
 
 def node_enrich_merge(state: MigrationState, migrator) -> MigrationState:
     """
-    Order enriched articles, persist references cache, log, and keep PDF data for field
-    completion.
+    Order enriched articles, persist references cache, and log JSON before field
+    completion (PDF extract dicts stay in _pdf_item_cache for field_prepare).
     """
     s = MigrationState.model_validate(state)
     _stage("Enriquecimento: juntar artigos, gravar cache de referências e JSON intermédio")
     worker_chunks = sorted(s.enriched_article_chunks or [], key=lambda x: x["order"])
+    if not worker_chunks:
+        # No enrich workers ran (e.g. all articles skipped); drop stale PDF cache.
+        with migrator._pdf_item_cache_lock:
+            migrator._pdf_item_cache.clear()
     skipped_chunks = list(s.skipped_enrichment_chunks or [])
     chunks = sorted(
         worker_chunks + skipped_chunks,
@@ -338,7 +353,7 @@ def node_enrich_merge(state: MigrationState, migrator) -> MigrationState:
     articles_dict_list = [c["article_dict"] for c in chunks]
     JsonLogger.print_json("articles_metadata_antes_do_field_completion", articles_dict_list)
 
-    migrator._last_pdf_files_data = getattr(migrator, "_enrich_pdf_files_data", None)
+    migrator._last_pdf_files_data = None
 
     print(
         f"    Gravado articles_metadata_antes_do_field_completion.json "
@@ -378,10 +393,18 @@ def node_field_prepare(state: MigrationState, migrator) -> MigrationState:
             pass
 
     migrator._field_completion_cache = migrator._load_completion_cache()
-    migrator._field_completion_pdf_raw_by_id = migrator._build_pdf_raw_by_id()
+    print(
+        f"    A carregar excertos das primeiras páginas para {len(articles)} artigo(s)…",
+        flush=True,
+    )
+    migrator._field_completion_pdf_raw_by_id = migrator._build_pdf_raw_by_id(
+        articles, s.pages_to_process
+    )
+    with migrator._pdf_item_cache_lock:
+        migrator._pdf_item_cache.clear()
 
     print(
-        f"    {len(articles)} artigo(s) para completar campos com IA (em paralelo).",
+        f"    {len(articles)} artigo(s) para completar campos com IA.",
         flush=True,
     )
 
@@ -440,10 +463,63 @@ def node_field_one_article(state: MigrationState, migrator) -> dict[str, Any]:
 
 
 def node_field_merge(state: MigrationState, migrator) -> MigrationState:
+    """
+    Reduce field-completion chunks into one ordered list (no author LLM, no disk yet).
+    """
     s = MigrationState.model_validate(state)
-    _stage("Field completion: juntar resultados, gravar JSON final e CSVs (Artigos, Autores, Referências)")
+    _stage("Field completion: juntar resultados dos workers")
     chunks = sorted(s.field_completion_chunks or [], key=lambda x: x["order"])
-    updated_articles = [Article.from_dict(c["article_dict"]) for c in chunks]
+    merged_dicts = [dict(c["article_dict"]) for c in chunks]
+    return MigrationState.model_validate(state).model_copy(
+        update={
+            "field_completion_merged_dict_list": merged_dicts,
+        }
+    )
+
+
+def node_author_affiliation_email_enrich(state: MigrationState, migrator) -> MigrationState:
+    """
+    Enrich author affiliation, country, and email from PDF via LLM (names unchanged).
+    """
+    s = MigrationState.model_validate(state)
+    _stage(
+        "Autores: afiliação, país e e-mail a partir do PDF (IA, 1ª página)"
+    )
+    merged = list(s.field_completion_merged_dict_list or [])
+    if not merged:
+        print(
+            "    Nenhum artigo neste lote; a saltar enriquecimento de autores.",
+            flush=True,
+        )
+        return s
+
+    articles = [Article.from_dict(d) for d in merged]
+    migrator.enrich_article_authors_affiliation_email_with_llm(
+        articles,
+        max_pages_per_pdf=1,
+    )
+    out_dicts = [a.to_dict() for a in articles]
+    print(
+        f"    Enriquecimento de autores concluído para {len(out_dicts)} artigo(s).",
+        flush=True,
+    )
+    return MigrationState.model_validate(state).model_copy(
+        update={"field_completion_merged_dict_list": out_dicts}
+    )
+
+
+def node_finalize_field_outputs(state: MigrationState, migrator) -> MigrationState:
+    """
+    Merge batch with prior apos JSON, write articles_metadata_apos_do_field_completion
+    and CSVs (Artigos, Autores, Referências).
+    """
+    s = MigrationState.model_validate(state)
+    _stage(
+        "Gravar articles_metadata_apos_do_field_completion.json e CSVs "
+        "(Artigos, Autores, Referências)"
+    )
+    merged_in = list(s.field_completion_merged_dict_list or [])
+    updated_articles = [Article.from_dict(d) for d in merged_in]
     merged_articles = migrator.finalize_field_completion_outputs(updated_articles)
     return MigrationState.model_validate(state).model_copy(
         update={

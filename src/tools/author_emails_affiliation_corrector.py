@@ -12,7 +12,7 @@ from src.utils.pdf_processor import PDFProcessor
 def main(
     use_llm_emails: bool = False,
     use_llm_affiliations: bool = False,
-    max_pages: int = 5,
+    max_pages: int = 1,
     max_articles: int | None = None,
 ) -> None:
     """
@@ -22,17 +22,12 @@ def main(
     - Sempre tenta preencher/ajustar e-mails a partir de metadados JSON e cache
       do website.
 
-    use_llm_emails=False:
+    use_llm_emails=False e use_llm_affiliations=False:
         Usa apenas JSON de metadados e cache do website para e-mails.
-    use_llm_emails=True:
-        Extrai e-mails dos PDFs via LLM (até max_pages páginas por PDF; texto
-        é cortado em Resumo/Abstract só aqui; main.py continua enviando resumo
-        para Artigos.csv).
-
-    use_llm_affiliations=True:
-        Quando True, usa LLM para recalcular/normalizar afiliações (pt e en)
-        dos autores a partir dos PDFs, gerando um arquivo
-        Autores_afiliacoes_{year}.csv no diretório de CSV do ano configurado.
+    Se qualquer um for True:
+        Uma única chamada LLM por artigo (prompt ``author_affiliation_email_extraction``)
+        preenche afiliações, país (por extenso) e e-mails a partir da primeira página
+        do PDF (até Resumo/Abstract). max_pages é ignorado em favor de 1 página.
 
     max_articles:
         Se definido, processa só os primeiros N artigos (útil para testes).
@@ -52,52 +47,35 @@ def main(
         from src.logging.json_logger import JsonLogger
 
         JsonLogger.initialize(config_loader)
-        ai_client_emails = (
-            LangChainClient(config_loader, "author_email_extraction")
-            if use_llm_emails
-            else None
-        )
-        ai_client_affiliations = (
-            LangChainClient(config_loader, "author_affiliation_extraction")
-            if use_llm_affiliations
-            else None
+        ai_client = LangChainClient(
+            config_loader, "author_affiliation_email_extraction"
         )
         pdf_processor = PDFProcessor(extractor.pdf_folder)
         limit_msg = f" (primeiros {max_articles} artigos)" if max_articles else ""
 
-        if use_llm_emails:
-            print(f"Extraindo e-mails dos artigos (PDF) via LLM{limit_msg}...")
-            authors_df = extractor.fill_missing_emails_from_llm(
-                ai_client_emails,
-                pdf_processor,
-                max_pages_per_pdf=max_pages,
-                start_df=authors_df,
-                max_articles=max_articles,
-            )
+        print(
+            f"Extraindo afiliações e e-mails dos artigos (PDF) via LLM{limit_msg}..."
+        )
+        authors_df = extractor.fill_affiliation_email_from_llm(
+            ai_client,
+            pdf_processor,
+            max_pages_per_pdf=1,
+            start_df=authors_df,
+            max_articles=max_articles,
+        )
 
         if use_llm_affiliations:
-            print(
-                "Extraindo e normalizando afiliações dos autores "
-                f"(PDF) via LLM{limit_msg}..."
-            )
-            authors_df_affiliations = extractor.fill_affiliations_from_llm(
-                ai_client_affiliations,
-                pdf_processor,
-                max_pages_per_pdf=max_pages,
-                start_df=authors_df,
-                max_articles=max_articles,
-            )
-            extractor.save_authors_affiliations_2018(authors_df_affiliations)
+            extractor.save_authors_affiliations_export(authors_df)
 
     print("Salvando resultado em Autores_emails_{year}.csv...")
-    extractor.save_authors_emails_2018(authors_df)
+    extractor.save_authors_emails_export(authors_df)
+    print("Atualizando Autores.csv com e-mails e afiliações consolidados...")
+    extractor.save_autores_csv(authors_df)
 
 
 if __name__ == "__main__":
     os.system("cls" if os.name == "nt" else "clear")
     # Configuração padrão (ajuste conforme necessidade):
-    # - use_llm_emails: controla uso de LLM para e-mails
-    # - use_llm_affiliations: controla uso de LLM para afiliações
     use_llm_emails = False
     use_llm_affiliations = True
     max_pages = 1

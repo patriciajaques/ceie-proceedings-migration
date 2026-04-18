@@ -55,6 +55,10 @@ class MigrationState(BaseModel):
     field_completion_chunks: Annotated[list[dict[str, Any]], operator.add] = Field(
         default_factory=list
     )
+    # After field_merge (ordered batch); before author PDF enrich and finalize.
+    field_completion_merged_dict_list: list[dict[str, Any]] = Field(
+        default_factory=list
+    )
 
     # Inferred / derived values
     inferred_doi_prefix: Optional[str] = None

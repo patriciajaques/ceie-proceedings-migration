@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.utils.section_abbrev import is_editorial_section_abbrev
+
 # Project root (parent of src)
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -45,7 +47,6 @@ def _load_config_and_deps():
 
     config_loader = ConfigLoader(str(ROOT / "config" / "config.json"))
     client_specs = {
-        "article_ai_client": "article_extraction",
         "references_ai_client": "references_extraction",
         "field_completion_ai_client": "field_completion",
         "text_processing_client": "text_processing",
@@ -56,7 +57,6 @@ def _load_config_and_deps():
     }
     text_processor = TextProcessor(ai_clients["text_processing_client"])
     article_extractor = ArticleExtractor(
-        ai_clients["article_ai_client"],
         ai_clients["references_ai_client"],
         ai_clients["field_completion_ai_client"],
         text_processor,
@@ -76,7 +76,7 @@ def _articles_without_references(
     artigos_df["seq"] = artigos_df["seq"].astype(str).str.strip()
     # Exclude editorials (no references expected) and articles that already have refs
     mask = (
-        (artigos_df["sectionAbbrev"].astype(str).str.strip() != "EDT")
+        ~artigos_df["sectionAbbrev"].astype(str).map(is_editorial_section_abbrev)
         & (~artigos_df["seq"].isin(articles_with_refs))
     )
     return artigos_df[mask].copy()

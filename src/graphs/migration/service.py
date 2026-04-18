@@ -33,6 +33,21 @@ def _memory_checkpointer() -> Any:
     return MemorySaver()
 
 
+def _coerce_graph_result(raw: Any) -> MigrationState:
+    """
+    LangGraph may return a plain dict when compiled without a checkpointer;
+    with a checkpointer it often returns the same type as the input state.
+    """
+    if isinstance(raw, MigrationState):
+        return raw
+    if isinstance(raw, dict):
+        return MigrationState.model_validate(raw)
+    raise TypeError(
+        f"Unexpected graph invoke result type: {type(raw).__name__!r}; "
+        "expected MigrationState or dict."
+    )
+
+
 class MigrationGraphService:
     """
     Service wrapper that runs the central LangGraph pipeline.
@@ -116,9 +131,10 @@ class MigrationGraphService:
                 migrator=self.migrator, checkpointer=checkpointer
             )
             if invoke_config:
-                final_state: MigrationState = runnable.invoke(state, invoke_config)
+                final_raw = runnable.invoke(state, invoke_config)
             else:
-                final_state = runnable.invoke(state)
+                final_raw = runnable.invoke(state)
+            final_state = _coerce_graph_result(final_raw)
         finally:
             if sqlite_cm is not None:
                 sqlite_cm.__exit__(None, None, None)

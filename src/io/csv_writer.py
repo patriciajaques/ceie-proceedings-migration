@@ -4,6 +4,8 @@ import json
 import os
 import re
 
+from src.domain.article import normalize_keywords_field
+
 
 class CsvWriter:
     """
@@ -113,7 +115,9 @@ class CsvWriter:
             sanitized_data = {}
             for key in headers:
                 value = data.get(key, "")
-                if isinstance(value, str):
+                if key in ("keywordsOrig", "keywordsEn"):
+                    value = normalize_keywords_field(value)
+                elif isinstance(value, str):
                     # Remover quebras de linha internas para evitar
                     # que um único campo ocupe múltiplas linhas no CSV
                     value = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")

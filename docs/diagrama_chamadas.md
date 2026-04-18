@@ -2,9 +2,9 @@
 
 A **orquestração da migração central** usa **LangGraph** (`src/graphs/migration/`), com estado compartilhado `MigrationState` (Pydantic) passado entre nós. **LangChain** (ChatOpenAI, ChatAnthropic, etc.) abstrai as chamadas a LLMs (OpenAI, Anthropic, etc.).
 
-Fluxo de entrada: `main` → `MigrationGraphService.run()` → grafo compilado (`build_migration_graph.invoke`) → cada nó chama métodos do `Migrator` e demais serviços. A ordem no grafo é linear: `infer_doi_prefix` e `extract_sections` executam **antes** do processamento completo dos PDFs no nó `enrich_from_pdfs`.
+Fluxo de entrada: `main` → `MigrationGraphService.run()` → grafo compilado (`build_migration_graph.invoke`) → cada nó chama métodos do `Migrator` e demais serviços. Depois de `build_articles`, o grafo passa por `skip_completed_articles` e, em seguida, **enriquecimento por artigo** (`enrich_prepare` → vários `enrich_one_article` via `Send` → `enrich_merge`), depois **field completion** (`field_prepare` → `field_one_article` → `field_merge` → `author_affiliation_email` → `finalize_field_outputs`). Cada PDF é lido com `PDFProcessor.process_pdf_at_path` **só quando o artigo correspondente é tratado** (não há varredura de pasta inteira na pipeline principal).
 
-Fluxo lógico (site-first): metadados no Milanesa/OJS → **validar o ano** (DOIs) → baixar PDFs → inferir prefixo DOI → **Secoes.csv** → montar `Article` a partir do site → enriquecer com PDF (**páginas + referências**, cache em `references_cache.json`) → field completion → CSVs.
+Fluxo lógico (site-first): metadados no Milanesa/OJS → **validar o ano** (DOIs) → baixar PDFs do lote → inferir prefixo DOI → **Secoes.csv** → montar `Article` → filtrar já completos (opcional) → por artigo do lote: **um PDF** → páginas + referências (cache `references_cache.json` + `_pdf_item_cache` em memória entre enrich e field) → field completion → afiliação/e-mail dos autores (IA, 1ª página) → `articles_metadata_apos_do_field_completion.json` + CSVs.
 
 ---
 
@@ -19,9 +19,42 @@ flowchart LR
     C --> D[infer_doi_prefix]
     D --> E[extract_sections]
     E --> F[build_articles]
-    F --> G[enrich_from_pdfs]
-    G --> H[field_completion_and_write_csvs]
+    F --> S[skip_completed_articles]
+    S --> P[enrich_prepare]
+    P --> O[enrich_one_article]
+    O --> M[enrich_merge]
+    S -.->|só saltados| M
+    M --> FP[field_prepare]
+    FP --> FO[field_one_article]
+    FO --> FM[field_merge]
+    FM --> AA[author_affiliation_email]
+    AA --> FF[finalize_field_outputs]
+    FF --> Z([Fim])
 ```
+
+### Sequência de nós — resumo do que cada um faz
+
+Ordem exata em `graph.py`. Os nomes à direita são os identificadores dos nós no grafo.
+
+| Nó | Função (resumo) |
+|----|-----------------|
+| `fetch_website_articles` | Obtém a lista de artigos do OJS (usa `website_articles_cache.json` quando existe; senão percorre o site e grava cache). |
+| `validate_year` | Garante que o ano em `config.json` é consistente com os DOIs dos metadados carregados; interrompe a execução se não for. |
+| `download_pdfs` | Descarrega os PDFs do lote configurado para `output/{year}/pdfs/{idJEMS}.pdf`. |
+| `infer_doi_prefix` | Calcula o prefixo DOI a partir dos DOIs já presentes na lista do site (quando aplicável). |
+| `extract_sections` | Extrai secções do site (OJS) e grava `Secoes.csv`. |
+| `build_articles` | Constrói objetos `Article` a partir dos dicts do site, na ordem da edição. |
+| `skip_completed_articles` | Opcionalmente remove do lote artigos já “completos” em `articles_metadata_apos_do_field_completion.json`; os saltados são reintroduzidos no `enrich_merge`. |
+| `enrich_prepare` | Carrega `references_cache.json` e repõe estado para o map-reduce de enriquecimento. |
+| `enrich_one_article` | **Um worker por artigo:** lê o PDF (`PDFProcessor`), atualiza páginas, extrai referências (LLM), `correct_doi`; guarda texto em `_pdf_item_cache`. |
+| `enrich_merge` | Ordena os chunks, junta artigos saltados + processados, grava `articles_metadata_antes_do_field_completion.json`. |
+| `field_prepare` | Monta excertos brutos das primeiras páginas por `idJEMS` para o field completion (reutiliza cache quando possível); depois limpa `_pdf_item_cache`. |
+| `field_one_article` | **Um worker por artigo:** `do_field_completion_of_missing_values_in_dic` (LLM para títulos/resumos/palavras-chave, etc.). |
+| `field_merge` | **Reduce:** ordena os chunks do field completion e grava em estado `field_completion_merged_dict_list` (sem LLM de autores e sem gravar ainda o JSON `apos` final). |
+| `author_affiliation_email` | Para cada artigo do lote: LLM com prompt `author_affiliation_email_extraction` sobre a 1ª página do PDF (até Resumo/Abstract) — afiliação pt/en, país por extenso, e-mail; **nomes dos autores mantêm-se do Milanesa**. Atualiza `field_completion_merged_dict_list`. |
+| `finalize_field_outputs` | `Migrator.finalize_field_completion_outputs`: faz merge com execuções anteriores, grava `articles_metadata_apos_do_field_completion.json`, `Artigos.csv`, `Autores.csv`, `Referencias.csv` e CSVs por workshop. Atualiza `updated_articles_dict_list` no estado. |
+
+**Estado entre `field_merge` e `finalize_field_outputs`:** o campo `MigrationState.field_completion_merged_dict_list` transporta a lista de dicts de artigos já com field completion e, após `author_affiliation_email`, com afiliações/e-mails atualizados — é a entrada de `finalize_field_outputs`.
 
 ---
 
@@ -73,16 +106,14 @@ sequenceDiagram
     Migrator->>CsvWriter: write_sections_csv(csv_save_dir, sections_data)
 
     Graph->>Migrator: Article.from_dict por artigo (build_articles)
+    Graph->>Migrator: skip_completed_articles (cache após field completion)
 
-    Graph->>PDFProcessor: process_all_pdfs(save_files, number_of_pages_to_process)
-    loop por cada PDF
-        PDFProcessor->>PDFProcessor: extract_text_from_each_page(pdf_path)
-    end
+    Note over Graph,Migrator: enrich_prepare: _refs_cache; limpa _pdf_item_cache
 
-    Note over Graph,Migrator: enrich_from_pdfs: _extract_references_from_pdf_item, references_cache.json
-
-    loop por artigo com PDF correspondente (idJEMS = base_filename)
-        Migrator->>Migrator: update_pages(first_page, num_pages)
+    loop por artigo do lote (Send → enrich_one_article)
+        PDFProcessor->>PDFProcessor: process_pdf_at_path(pdf_path, pages_to_process)
+        Migrator->>Migrator: _pdf_item_cache[idJEMS] = pdf_item
+        Migrator->>Migrator: update_pages, _extract_references_from_pdf_item
         Migrator->>ArticleExtractor: get_reference_pages_text(pdf_item, section|last)
         Migrator->>ArticleExtractor: extract_references_metadata_with_ai(texto)
         Migrator->>Migrator: correct_doi(article)
@@ -90,13 +121,25 @@ sequenceDiagram
 
     Migrator->>JsonLogger: print_json("articles_metadata_antes_do_field_completion", ...)
 
+    Note over Graph,Migrator: field_prepare: _build_pdf_raw_by_id (reusa _pdf_item_cache; depois clear)
+
+    loop por artigo (Send → field_one_article)
+        Migrator->>ArticleExtractor: do_field_completion_of_missing_values_in_dic(...)
+    end
+
+    Note over Graph,Migrator: field_merge: ordena chunks → field_completion_merged_dict_list
+
+    loop por artigo do lote (nó author_affiliation_email)
+        Migrator->>Migrator: enrich_article_authors_affiliation_email_with_llm (PDF + LLM)
+    end
+
+    Note over Graph,Migrator: finalize_field_outputs: merge com apos anterior + disco
+
     Graph->>Migrator: finalize_field_completion_outputs(updated_articles)
-    Migrator->>Migrator: _load_completion_cache()
-    Migrator->>JsonLogger: read_json_file("articles_metadata_apos_do_field_completion.json")
-    Migrator->>ArticleExtractor: do_field_completion_of_missing_values_in_dic(articles_list, completion_cache)
+    Migrator->>Migrator: _load_articles_metadata_apos_dicts(); _merge_articles_for_full_output
     Migrator->>JsonLogger: print_json("articles_metadata_apos_do_field_completion", ...)
-    Migrator->>CsvWriter: __init__(); write_dicts_to_csv(updated_articles)
-    Migrator->>Migrator: write_csv_by_workshop(updated_articles)
+    Migrator->>CsvWriter: write_dicts_to_csv(merged_articles)
+    Migrator->>Migrator: write_csv_by_workshop(merged_articles)
 ```
 
 ---
@@ -164,7 +207,7 @@ flowchart LR
 
 ## Migrator: enriquecimento site-first
 
-Metadados vêm do OJS; o PDF complementa páginas e referências.
+Metadados vêm do OJS (incluindo idioma na `rt/metadata` quando a tabela expõe o campo); o PDF complementa páginas e referências.
 
 ```mermaid
 flowchart TB
@@ -204,12 +247,12 @@ flowchart TB
 | Módulo            | Métodos chamados (principais) |
 |-------------------|-------------------------------|
 | **main**          | ConfigLoader, JsonLogger.initialize, LangChainClient(x5), TextProcessor, ArticleExtractor, Migrator, **MigrationGraphService.run(MigrationGraphInput)** |
-| **langgraph (graph)** | `build_migration_graph` → nós: fetch_website_articles → validate_year → download_pdfs → infer_doi_prefix → extract_sections → build_articles → enrich_from_pdfs → field_completion_and_write_csvs |
+| **langgraph (graph)** | `build_migration_graph` → fetch_website_articles → validate_year → download_pdfs → infer_doi_prefix → extract_sections → build_articles → skip_completed_articles → enrich_prepare → enrich_one_article (×N) → enrich_merge → field_prepare → field_one_article (×N) → field_merge → **author_affiliation_email** → **finalize_field_outputs** |
 | **MigrationGraphService** | Monta `MigrationState`, chama `graph.invoke(state)`, devolve `MigrationGraphOutput` |
-| **Migrator**      | _get_website_articles_data, _validate_year_matches_site_or_abort, downloader.donwload_pdf_files_from_url, _extract_references_from_pdf_item, finalize_field_completion_outputs, _load_completion_cache, write_csv_by_workshop, update_pages, correct_doi, _normalize_doi, _infer_doi_prefix |
+| **Migrator**      | _get_website_articles_data, _validate_year_matches_site_or_abort, downloader, _extract_references_from_pdf_item, _build_pdf_raw_by_id, _pdf_item_cache, **enrich_article_authors_affiliation_email_with_llm**, finalize_field_completion_outputs, _load_completion_cache, _merge_articles_for_full_output, write_csv_by_workshop, update_pages, correct_doi, _infer_doi_prefix |
 | **PDFDownloader** | get_pdf_urls, download_and_save_pdf (requests.get) |
-| **PDFProcessor**  | process_all_pdfs, extract_text_from_each_page (fitz) |
-| **OJSHTMLParser** | extract_articles_info_from_the_website, download_html_and_create_parser, extract_sections_from_website, get_metadata, convert_url, _generate_section_abbrev, _make_abbrev_unique |
+| **PDFProcessor**  | `extract_text_from_each_page`, `process_pdf_at_path` (um ficheiro por chamada; sem `process_all_pdfs`) |
+| **OJSHTMLParser** | extract_articles_info_from_the_website, download_html_and_create_parser, extract_sections_from_website, get_metadata, _metadata_table_field, _normalize_language_from_metadata, convert_url, _generate_section_abbrev, _make_abbrev_unique |
 | **ArticleExtractor** | get_reference_pages_text, extract_references_metadata_with_ai, extract_pages, extract_info_with_ai, do_field_completion_of_missing_values_in_dic, has_empty_fields, parse_ai_response, _log_ai_call |
 | **TextProcessor** | clean_text, detect_encoding_errors, basic_cleaning, process_with_ai |
 | **LangChainClient** | _detect_provider, _initialize_client (ChatOpenAI/ChatAnthropic/…), create_completion (invoke messages); uses ConfigLoader.load_prompt + get_api_key_for_provider |
@@ -221,7 +264,7 @@ flowchart TB
 
 ## Observação
 
-**LangGraph** orquestra o pipeline central: `main` → `MigrationGraphService` → grafo `invoke` → nós chamam `Migrator` e serviços. A ordem das etapas no grafo é linear (ver seção “Grafo LangGraph”). **LangChain** continua sendo o caminho para chamadas à IA (`LangChainClient.create_completion()`). Ferramentas em `src/tools/` permanecem fora do grafo (scripts à parte).
+**LangGraph** orquestra o pipeline central: `main` → `MigrationGraphService` → grafo `invoke` → nós chamam `Migrator` e serviços. Há ramificações condicionais (`skip_completed_articles`, `route_enrich_articles`, `route_field_completion`) e **map-reduce** com `Send` para `enrich_one_article` e `field_one_article`. Depois do `field_merge` seguem **dois nós sequenciais**: `author_affiliation_email` (LLM afiliação/e-mail no PDF) e `finalize_field_outputs` (JSON `apos` + CSVs). O parâmetro `max_concurrency` no `invoke` limita o paralelismo (ex.: `1` = sequencial). **LangChain** continua sendo o caminho para chamadas à IA (`LangChainClient.create_completion()`). Ferramentas em `src/tools/` permanecem fora do grafo (scripts à parte).
 
 ---
 

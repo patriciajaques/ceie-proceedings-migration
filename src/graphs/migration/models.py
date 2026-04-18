@@ -25,7 +25,7 @@ class MigrationGraphInput(BaseModel):
         default=True,
         description=(
             "If True, skip PDF enrichment for articles already fully present in "
-            "articles_metadata_apos_do_field_completion.json (has_empty_fields false)."
+            "articles_metadata_apos_do_field_completion.json (metadata_text_fields_complete)."
         ),
     )
     persist_checkpoint: bool = Field(

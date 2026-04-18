@@ -5,18 +5,23 @@
     "prompts_file": "config/prompts.yaml",
     "engine": "gpt-5-nano-2025-08-07",
     "engine_description": "GPT-5 Nano (usamos GPT 5 mini anteriormente, mas o modelo nano é mais rápido e barato e apresenta resultados de qualidade semelhante)",
-    "max_tokens": 10000,
+    "max_tokens": 100000,
+    "max_tokens_description": "Output token budget (completion + reasoning for GPT-5). Increase if field_completion returns empty with finish_reason=length.",
+    "openai_reasoning_effort": "high",
+    "openai_reasoning_effort_description": "GPT-5 only: minimal|low|medium|high. Higher effort often improves structured JSON (affiliations/emails) but consumes more of max_tokens; if answers are empty or truncated, raise max_tokens or lower effort. Code default when key is missing is still minimal.",
     "pages_to_process": 11,
-    "files_to_download": 10,
+    "files_to_download": 25,
     "files_to_download_description": "Use -1 for all articles (from article_offset onward).",
-    "article_offset": 0,
+    "article_offset": 8,
     "article_offset_description": "Skip first N articles (issue order). Batch example: run1 files_to_download=10 offset=0; run2 files_to_download=10 offset=10. If you only raise files_to_download (10→20) without offset, the first 10 are processed again.",
     "skip_fully_processed_articles": true,
     "skip_fully_processed_articles_description": "If true, skip PDF/reference enrichment for articles already fully stored in articles_metadata_apos_do_field_completion.json (same rule as has_empty_fields).",
     "langchain_tracing": false,
     "langchain_tracing_description": "If false, sets LANGCHAIN_TRACING_V2=false so LangSmith does not log runs (large PDF inputs cause 422 ingest errors). Set true only for debugging with smaller prompts.",
     "max_concurrency": 1,
-    "max_concurrency_description": "LangGraph thread pool for parallel Send workers (enrich + field completion). Use 1 for sequential (lower RAM). Omit key or use null for default parallel behaviour."
+    "max_concurrency_description": "LangGraph thread pool for parallel Send workers (enrich + field completion). Use 1 for sequential (lower RAM). Omit key or use null for default parallel behaviour.",
+    "persist_checkpoint": false,
+    "persist_checkpoint_description": "If false, LangGraph runs without SQLite/memory checkpointer (faster; no resume from mid-run). If true, checkpoint under output/{year}/logs/migration_graph_checkpoint.sqlite when sqlite is available."
 }
 
 

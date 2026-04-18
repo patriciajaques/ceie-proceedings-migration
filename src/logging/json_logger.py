@@ -112,7 +112,7 @@ class JsonLogger:
         Registra uma chamada à IA em ai_calls.log.jsonl com etapa explícita.
 
         Permite identificar no log e no LangSmith se a chamada foi
-        text_processing, field_completion, article_extraction, etc.
+        text_processing, field_completion, references_extraction, etc.
 
         Args:
             step: Nome da etapa (ex.: "text_processing", "field_completion").

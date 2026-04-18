@@ -12,9 +12,11 @@ from .nodes import (
     node_enrich_prepare,
     node_extract_sections_and_write_csv,
     node_fetch_website_articles,
+    node_author_affiliation_email_enrich,
     node_field_merge,
     node_field_one_article,
     node_field_prepare,
+    node_finalize_field_outputs,
     node_infer_doi_prefix,
     node_skip_completed_articles,
     node_validate_year,
@@ -33,6 +35,10 @@ def build_migration_graph(*, migrator, checkpointer: Any | None = None) -> Any:
 
     Enrichment from PDFs and field completion use map-reduce (Send per article) so a
     checkpointer can persist progress after each article super-step.
+
+    After field completion merge: ``author_affiliation_email`` (PDF LLM for
+    affiliation/country/email), then ``finalize_field_outputs`` writes
+    ``articles_metadata_apos_do_field_completion.json`` and CSVs.
     """
 
     graph = StateGraph(MigrationState)
@@ -61,6 +67,14 @@ def build_migration_graph(*, migrator, checkpointer: Any | None = None) -> Any:
         "field_one_article", lambda s: node_field_one_article(s, migrator)
     )
     graph.add_node("field_merge", lambda s: node_field_merge(s, migrator))
+    graph.add_node(
+        "author_affiliation_email",
+        lambda s: node_author_affiliation_email_enrich(s, migrator),
+    )
+    graph.add_node(
+        "finalize_field_outputs",
+        lambda s: node_finalize_field_outputs(s, migrator),
+    )
 
     graph.set_entry_point("fetch_website_articles")
     graph.add_edge("fetch_website_articles", "validate_year")
@@ -90,6 +104,8 @@ def build_migration_graph(*, migrator, checkpointer: Any | None = None) -> Any:
         ["field_one_article", "field_merge"],
     )
     graph.add_edge("field_one_article", "field_merge")
-    graph.add_edge("field_merge", END)
+    graph.add_edge("field_merge", "author_affiliation_email")
+    graph.add_edge("author_affiliation_email", "finalize_field_outputs")
+    graph.add_edge("finalize_field_outputs", END)
 
     return graph.compile(checkpointer=checkpointer)

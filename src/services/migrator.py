@@ -15,6 +15,7 @@ from src.domain.article import Article
 from src.domain.reference import Reference
 import os
 import re
+import threading
 
 
 def _article_id_from_dict(d: dict[str, Any]) -> str:
@@ -40,6 +41,7 @@ class Migrator:
             config_loader (ConfigLoader): Configuration loader instance.
             article_extractor (ArticleExtractor): Article extractor instance.
         """
+        self.config_loader = config_loader
         # Load configuration values
         self.site_url = config_loader.get_config_value("site_url")
         self.output_dir = config_loader.get_config_value("output_dir")
@@ -60,6 +62,11 @@ class Migrator:
         self.processor = PDFProcessor(self.pdf_save_dir)
         self.parser = OJSHTMLParser(self.site_url)
         self.extractor = article_extractor
+
+        # Populated during enrich_one_article; reused in _build_pdf_raw_by_id for the
+        # same batch (at most one pdf_item per article in the lot, not all 150 PDFs).
+        self._pdf_item_cache: dict[str, dict[str, Any]] = {}
+        self._pdf_item_cache_lock = threading.Lock()
 
     def _extract_references_from_pdf_item(self, pdf_item: dict) -> list[dict]:
         """
@@ -308,22 +315,71 @@ class Migrator:
             return {_article_id_from_dict(d): d for d in by_list}
         return {}
 
-    def _build_pdf_raw_by_id(self):
+    def _build_pdf_raw_by_id(
+        self,
+        articles: list[dict[str, Any]],
+        pages_to_process: int,
+    ) -> dict[str, str]:
         """
-        Constrói um dicionário id_jems (base_filename) -> texto bruto das primeiras páginas.
-        Sem clean_text aqui: a correção é feita só no artigo que for usar (no field completion).
+        Build id_jems -> raw first-page text for field completion.
+
+        Reuses ``_pdf_item_cache`` filled during enrich when possible (same batch).
+        Falls back to disk for skipped-enrich articles or cache misses.
+        No clean_text here; correction runs per article during field completion.
         """
-        raw_by_id = {}
-        pdf_files_data = getattr(self, "_last_pdf_files_data", None)
-        if not pdf_files_data:
-            return raw_by_id
-        for item in pdf_files_data:
-            base_filename = item.get("base_filename", "")
-            if not base_filename:
+        raw_by_id: dict[str, str] = {}
+        for ad in articles:
+            if not isinstance(ad, dict):
                 continue
+            aid = _article_id_from_dict(ad)
+            if not aid:
+                continue
+            with self._pdf_item_cache_lock:
+                item = self._pdf_item_cache.get(aid)
+            if item is None:
+                pdf_path = os.path.join(self.pdf_save_dir, f"{aid}.pdf")
+                if not os.path.isfile(pdf_path):
+                    continue
+                try:
+                    item = self.processor.process_pdf_at_path(pdf_path, pages_to_process)
+                except Exception:
+                    continue
             first_pages = self.extractor.extract_pages(item, "first")
-            raw_by_id[base_filename] = first_pages
+            raw_by_id[aid] = first_pages
         return raw_by_id
+
+    def enrich_article_authors_affiliation_email_with_llm(
+        self,
+        articles: list[Article],
+        max_pages_per_pdf: int = 1,
+    ) -> None:
+        """
+        Fill missing authorAffiliation, authorAffiliationEn, authorCountry, and
+        authorEmail from PDF text via a single LLM call per article.
+
+        Uses the first PDF page only (see AuthorsEmailExtractor). Called after
+        field completion and before writing CSVs.
+        """
+        if not articles:
+            return
+
+        from src.adapters.langchain_client import LangChainClient
+        from src.services.authors_email_extractor import AuthorsEmailExtractor
+
+        print(
+            "\n>>> Afiliações, país e e-mails: completar com IA (1ª página do PDF)",
+            flush=True,
+        )
+        client = LangChainClient(
+            self.config_loader, "author_affiliation_email_extraction"
+        )
+        helper = AuthorsEmailExtractor(self.config_loader)
+        helper.apply_affiliation_email_llm_to_article_objects(
+            articles,
+            client,
+            self.processor,
+            max_pages_per_pdf=max_pages_per_pdf,
+        )
 
     def finalize_field_completion_outputs(
         self, updated_articles: list[Article]

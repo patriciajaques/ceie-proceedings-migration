@@ -13,9 +13,10 @@ This project is an automated tool for extracting and processing academic article
 The system performs the following high-level tasks:
 1. Parse HTML pages from OJS (Milanesa) for article metadata (source of truth) and validate the configured year against DOIs
 2. Download PDF files for the same issue
-3. Extract text from PDFs only for page counts and **reference** sections (AI-assisted)
+3. For each article in the configured batch, open **only** that article’s PDF (`{idJEMS}.pdf`) and extract text (up to `pages_to_process` pages) for page counts and **reference** sections (AI-assisted). A small in-memory cache reuses the same extraction for field-completion “first pages” when possible — the pipeline does **not** scan the entire PDF folder up front.
 4. Use AI to complete any remaining missing fields (field completion)
-5. Generate standardized CSV files for articles, authors, and references
+5. Enrich author affiliation, country, and email from each article’s first PDF page (in-graph node `author_affiliation_email`; names remain from the site)
+6. Generate standardized CSV files for articles, authors, and references
 
 ## Project Structure
 
@@ -90,10 +91,11 @@ The application uses a robust configuration system:
 2. **LangGraph run**: The central pipeline executes as a graph of steps (see `src/graphs/migration/graph.py`)
 3. **Website metadata**: OJS HTML parsing loads titles, authors, abstracts, DOIs, etc.; the configured year is checked against DOIs before enrichment
 4. **PDF Download**: PDFs are downloaded for the same issue
-5. **Text extraction (targeted)**: PDF text is used for page counts and **references** extraction (AI); article titles and abstracts come from the website
-6. **Completion**: AI fills in any missing fields (field completion)
-7. **Affiliation Correction**: Author affiliations can be standardized and translated (via dedicated tools when run)
-8. **Output Generation**: Three CSV files are produced:
+5. **Text extraction (per article, batch-scoped)**: `PDFProcessor.process_pdf_at_path` runs per article in the batch; `references_cache.json` and optional skip of fully processed articles reduce rework. Website remains source of truth for titles/abstracts.
+6. **Field completion**: AI fills missing article-level fields (titles, abstracts, keywords, etc.). Editorial items (EDT section) use a dedicated path for `titleEn`/`language`; Portuguese-only-ASCII titles are not misclassified as English (see `docs/DOCUMENTACAO_PROJETO.md`, section 3.2.1).
+7. **Author affiliation / country / email (in-graph)**: After field completion, the `author_affiliation_email` graph node runs one LLM call per article (first PDF page, prompt `author_affiliation_email_extraction` in `config/prompts.yaml`). Author **names** stay as from the OJS/Milanesa site; only affiliation, country (full name), and email are filled from the PDF. Then `finalize_field_outputs` writes `articles_metadata_apos_do_field_completion.json` and the CSVs (see `docs/diagrama_chamadas.md` for the full node sequence).
+8. **Standalone corrector (optional)**: `src/tools/author_emails_affiliation_corrector.py` can re-run or adjust authors in `Autores.csv` outside a full graph run (see `docs/DOCUMENTACAO_PROJETO.md`, section 4.2).
+9. **Output generation**: The main run produces:
    - Articles.csv: Article metadata
    - Autores.csv: Author information
    - Referencias.csv: Bibliographic references
@@ -102,8 +104,9 @@ The application uses a robust configuration system:
 
 The system uses AI for these main tasks in the default migration:
 
-1. **References Extraction**: Extracts bibliography from the reference section / last pages of each PDF
-2. **Field Completion**: Fills in missing data when the website did not provide a value
+1. **References extraction**: Bibliography from the reference section / last pages of each PDF
+2. **Field completion**: Missing article metadata when the website did not provide a value
+3. **Author affiliation / email**: One combined LLM step per article (affiliation PT/EN, country, email from the first PDF page); see graph node `author_affiliation_email` and `docs/diagrama_chamadas.md`
 
 ## Configuration
 
@@ -117,8 +120,9 @@ Key configuration options:
 - `anthropic_model`: The Anthropic model to use
 - `output_dir`: Directory for output files
 - `doi_prefix`: (Optional) DOI prefix; if omitted, inferred from DOIs on the website
-- `pages_to_process`: Number of pages to process per PDF
-- `files_to_download`: Number of files to download (-1 for all)
+- `pages_to_process`: Max pages read per PDF per extraction
+- `files_to_download` / `article_offset`: Batch size and skip count in issue order
+- `skip_fully_processed_articles`, `langchain_tracing`, `max_concurrency`: See `docs/DOCUMENTACAO_PROJETO.md`
 
 ### Environment Variables (.env file)
 

@@ -1,6 +1,65 @@
 # src/domain/article.py
-from typing import Dict, Any
+import ast
+from typing import Any, Dict
+
 from src.domain.base_model import BaseModel
+
+
+def _strip_outer_single_quotes(s: str) -> str:
+    """Remove one layer of surrounding single quotes; unescape doubled quotes."""
+    s = s.strip()
+    if len(s) >= 2 and s[0] == "'" and s[-1] == "'":
+        return s[1:-1].replace("''", "'")
+    return s
+
+
+def _normalize_keywords_inner(raw: str) -> str:
+    """Collapse legacy separators ( ; | ) into comma+space for the cell body."""
+    t = _strip_outer_single_quotes(raw.strip())
+    if not t:
+        return ""
+    if " | " in t:
+        parts = [p.strip() for p in t.split(" | ") if p.strip()]
+        return ", ".join(parts)
+    if ";" in t:
+        parts = [p.strip() for p in t.split(";") if p.strip()]
+        return ", ".join(parts)
+    return t
+
+
+def normalize_keywords_field(value: Any) -> str:
+    """
+    Coerce keyword metadata to a plain string (comma-separated phrases).
+
+    LLM/JSON often returns lists; str(list) would produce brackets in CSV cells.
+    Lists/tuples become \"Teacher training, Technological methodologies, ...\".
+    Double-quote wrapping of the CSV field is done by CsvWriter (QUOTE_ALL), not here.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        parts: list[str] = []
+        for x in value:
+            if x is None:
+                continue
+            p = str(x).strip()
+            if not p:
+                continue
+            parts.append(_strip_outer_single_quotes(p))
+        if not parts:
+            return ""
+        return ", ".join(parts)
+    s = str(value).strip()
+    if not s:
+        return ""
+    if s.startswith("[") and s.endswith("]"):
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, (list, tuple)):
+                return normalize_keywords_field(parsed)
+        except (ValueError, SyntaxError):
+            pass
+    return _normalize_keywords_inner(s)
 
 
 class Article(BaseModel):
@@ -91,8 +150,8 @@ class Article(BaseModel):
         self.title_en = title_en
         self.abstract_orig = abstract_orig
         self.abstract_en = abstract_en
-        self.keywords_orig = keywords_orig
-        self.keywords_en = keywords_en
+        self.keywords_orig = normalize_keywords_field(keywords_orig)
+        self.keywords_en = normalize_keywords_field(keywords_en)
         self.language = language
         self.section_abbrev = section_abbrev
         self.first_page = first_page
@@ -125,6 +184,10 @@ class Article(BaseModel):
         # Handle special fields
         authors = article_data.pop("authors", [])
         references = article_data.pop("references", [])
+
+        for _kw in ("keywordsOrig", "keywordsEn"):
+            if _kw in article_data:
+                article_data[_kw] = normalize_keywords_field(article_data[_kw])
 
         # Use the parent class method to create the article
         article = super().from_dict(article_data)

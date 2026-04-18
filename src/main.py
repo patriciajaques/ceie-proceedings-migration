@@ -34,7 +34,6 @@ def main():
 
     # Clientes de IA via LangChain (um por tipo de prompt)
     client_specs = {
-        "article_ai_client": "article_extraction",
         "references_ai_client": "references_extraction",
         "field_completion_ai_client": "field_completion",
         "text_processing_client": "text_processing",
@@ -49,7 +48,6 @@ def main():
 
     # Initialize the article extractor with AI clients and text processor
     article_extractor = ArticleExtractor(
-        ai_clients["article_ai_client"],
         ai_clients["references_ai_client"],
         ai_clients["field_completion_ai_client"],
         text_processor,
@@ -66,6 +64,9 @@ def main():
     )
     _mc = config_loader.get_config_value("max_concurrency", default=None)
     max_concurrency = int(_mc) if _mc is not None else None
+    persist_checkpoint = bool(
+        config_loader.get_config_value("persist_checkpoint", default=True)
+    )
 
     # Execute the migration process via LangGraph (central pipeline)
     graph_service = MigrationGraphService(
@@ -79,6 +80,7 @@ def main():
             article_offset=int(article_offset),
             skip_fully_processed_articles=bool(skip_fully_processed),
             max_concurrency=max_concurrency,
+            persist_checkpoint=persist_checkpoint,
         )
     )
 
